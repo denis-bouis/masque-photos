@@ -30,24 +30,28 @@ corriger/valider → générer sur son **go explicite** (jamais de génération
 automatique dès que le manifest est complet).
 
 ### 1. Identifier les dates des photos
-Demander le dossier d'entrée (si non fourni), le dossier de sortie, le nom de
-l'événement (pavé "GARMIN" remplacé) et la couleur d'accent optionnelle — ces deux
-derniers sont **globaux** (uniformes sur tout le lot).
+Demander le **dossier événement** (si non fourni) — un dossier unique contenant un
+sous-dossier `in/` avec les photos, un sous-dossier `gpx/` pour les fichiers GPX
+(isolé de `in/`, rempli à l'étape 2), un sous-dossier `out/` pour les rendus, et le
+manifest à sa racine. Demander aussi le nom de l'événement (pavé "GARMIN" remplacé)
+et la couleur d'accent optionnelle — ces deux derniers sont **globaux** (uniformes sur
+tout le lot). Si les photos ne sont pas encore dans `<dossier-événement>/in/`, les y
+placer avant de continuer.
 
 ```bash
-"$PY" "$SCRIPT" --in-dir "<dossier-entrée>" --list-dates
+"$PY" "$SCRIPT" --dossier "<dossier-événement>" --list-dates
 ```
 Relever la date min et la date max détectées (bornes de la période à couvrir pour
 l'extraction GPX).
 
 ### 2. Extraire les GPX Garmin Connect correspondants
 ```bash
-"$PY" ~/Dev/masque-photos/export_garmin_gpx.py --debut <date-min> --fin <date-max> --out-dir "<dossier-entrée>"
+"$PY" ~/Dev/masque-photos/export_garmin_gpx.py --debut <date-min> --fin <date-max> --out-dir "<dossier-événement>/gpx"
 ```
-Télécharge dans le dossier d'entrée (co-localisé avec les photos, donc directement
-repris par `--gpx-dir` à l'étape suivante) tous les fichiers GPX Garmin Connect de la
-période — idempotent (fichiers déjà présents ignorés). Authentification via jeton mis
-en cache (`~/.garminconnect`), sans prompt si la session est déjà valide.
+Télécharge dans `<dossier-événement>/gpx/` (isolé de `in/`, directement repris par
+`--dossier` à l'étape suivante) tous les fichiers GPX Garmin Connect de la période —
+idempotent (fichiers déjà présents ignorés). Authentification via jeton mis en cache
+(`~/.garminconnect`), sans prompt si la session est déjà valide.
 
 **Si la commande échoue avec un message d'authentification** (jeton absent/expiré,
 aucun terminal interactif disponible pour ressaisir les identifiants) : ne pas tenter
@@ -57,26 +61,27 @@ puis relancer cette étape une fois la session réauthentifiée.
 
 ### 3. Générer le manifest initial
 ```bash
-"$PY" "$SCRIPT" --in-dir "<dossier-entrée>" --init-manifest \
-  --event-name "<Nom-Événement>" [--couleur "<optionnel>"] [--manifest "<manifest.json>"]
+"$PY" "$SCRIPT" --dossier "<dossier-événement>" --init-manifest \
+  --event-name "<Nom-Événement>" [--couleur "<optionnel>"]
 ```
-Le script scanne les photos (regroupées par date) et les fichiers `.gpx` du dossier
-d'entrée, rapproche chaque GPX de sa date (date du premier point du tracé) et écrit/
-complète le manifest : `event_name`/`couleur` globaux, une entrée par date détectée
-(`stat: []`, `gpx` renseigné si un fichier a été rapproché, `titre` **repris du nom de
-piste GPX** `<trk><name>` si disponible et pas déjà renseigné — plusieurs segments le
-même jour donnent des noms joints par ` / `). `lieu` reste toujours vide (aucune donnée
-GPX ne le fournit).
+Le script scanne `<dossier-événement>/in/` (photos regroupées par date) et
+`<dossier-événement>/gpx/` (fichiers `.gpx`), rapproche chaque GPX de sa date (date du
+premier point du tracé) et écrit/complète le manifest à la racine du dossier
+événement : `event_name`/`couleur` globaux, une entrée par date détectée (`stat: []`,
+`gpx` renseigné si un fichier a été rapproché — chemin relatif du type
+`gpx/activity_XXXX.gpx`, `titre` **repris du nom de piste GPX** `<trk><name>` si
+disponible et pas déjà renseigné — plusieurs segments le même jour donnent des noms
+joints par ` / `). `lieu` reste toujours vide (aucune donnée GPX ne le fournit).
 
 **Idempotent** : une date ou un champ déjà renseigné (y compris `titre` auto-rempli à
 une exécution précédente, `event_name`/`couleur` si non refournis) n'est jamais
 écrasé. Un GPX dont la date ne correspond à aucune photo est ignoré — le signaler à
 Denis s'il s'attendait à un rapprochement.
 
-Manifest par défaut : `<dossier-entrée>/manifest.json`. La sortie du script liste,
-pour chaque date : nombre de photos, statut (`rempli`/`à compléter` — une date reste
-`à compléter` tant que `lieu` est vide, même avec un `titre` auto-rempli), et le GPX
-rapproché le cas échéant.
+Manifest : `<dossier-événement>/manifest.json` (racine du dossier événement, pas dans
+`in/`). La sortie du script liste, pour chaque date : nombre de photos, statut
+(`rempli`/`à compléter` — une date reste `à compléter` tant que `lieu` est vide, même
+avec un `titre` auto-rempli), et le GPX rapproché le cas échéant.
 
 ### 4. Inviter Denis à corriger/valider le manifest
 Présenter à Denis, **en une seule fois**, toutes les dates avec leur `titre` proposé
@@ -95,7 +100,7 @@ signaler à Denis plutôt que de le corriger silencieusement.
   "titre": "J1 - ...",
   "lieu": "...",
   "stat": ["DURÉE|5h30|", "DISTANCE|18|km"],
-  "gpx": "in/activity_XXXX.gpx"
+  "gpx": "gpx/activity_XXXX.gpx"
 }
 ```
 `stat` suit le format `LABEL|VALEUR|UNITÉ` (même syntaxe qu'en CLI), liste vide si
@@ -109,8 +114,7 @@ dates, nombre de photos, event/couleur) et **attendre son go explicite** avant d
 le rendu — ne jamais enchaîner automatiquement après l'étape 4.
 
 ```bash
-"$PY" "$SCRIPT" --in-dir "<dossier-entrée>" --out-dir "<dossier-sortie>" \
-  --manifest "<manifest.json>"
+"$PY" "$SCRIPT" --dossier "<dossier-événement>"
 ```
 `--event-name`/`--couleur` ne sont plus nécessaires ici (lus depuis le manifest) ; ne
 les refournir que si Denis veut explicitement les changer par rapport à l'étape 3. Le
@@ -171,6 +175,10 @@ Garmin à la place de Denis.
 `--stat` (mode uniforme) / `stat` (manifest) est répétable, dans l'ordre d'affichage
 souhaité ; omettre les lignes non fournies par Denis. Ne jamais inventer une valeur
 manquante — l'omettre plutôt qu'un placeholder.
+
+`--dossier` (mode par date, recommandé) dérive `in/`, `gpx/`, `out/` et
+`manifest.json` — ne fournir `--in-dir`/`--gpx-dir`/`--out-dir`/`--manifest`
+explicitement que pour s'écarter de cette convention (cas rare).
 
 `--in-dir` accepte indifféremment un fichier ou un dossier ; si c'est un dossier,
 toutes les images qu'il contient (`.jpg`, `.jpeg`, `.png`, non récursif) sont traitées.

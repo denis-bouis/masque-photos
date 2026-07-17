@@ -583,10 +583,17 @@ def render_one(photo: Path, out_path: Path, event_name: str, titre: str, date_he
 
 def main():
     parser = argparse.ArgumentParser(description="Compose un habillage type Garmin sur une ou plusieurs photos.")
-    parser.add_argument("--in-dir", required=True, type=Path,
-                         help="Photo unique ou dossier de photos à traiter (traitement de masse si dossier)")
+    parser.add_argument("--dossier", type=Path, default=None,
+                         help="Dossier événement — dérive --in-dir (<dossier>/in), --gpx-dir "
+                              "(<dossier>/gpx), --out-dir (<dossier>/out) et --manifest "
+                              "(<dossier>/manifest.json) si ces options ne sont pas fournies "
+                              "explicitement. Usage standard : un dossier par événement/trek.")
+    parser.add_argument("--in-dir", type=Path, default=None,
+                         help="Photo unique ou dossier de photos à traiter (traitement de masse si dossier). "
+                              "Requis si --dossier n'est pas fourni.")
     parser.add_argument("--out-dir", type=Path,
-                         help="Dossier de sortie (requis hors --list-dates / --init-manifest)")
+                         help="Dossier de sortie (requis hors --list-dates / --init-manifest, sauf si "
+                              "--dossier est fourni)")
     parser.add_argument("--event-name", default=None,
                          help="Nom d'événement (pavé blanc en haut à droite). Mode --manifest : écrit/mis à "
                               "jour dans le manifest par --init-manifest, prioritaire sur la valeur déjà "
@@ -623,9 +630,23 @@ def main():
                               "--event-name/--couleur fournis explicitement). Quitte sans générer d'image.")
     parser.add_argument("--gpx-dir", type=Path, default=None,
                          help="Dossier des fichiers .gpx à rapprocher des dates (mode --init-manifest). "
-                              "Défaut : --in-dir.")
+                              "Déduit de --dossier (<dossier>/gpx) si omis ; à défaut, --in-dir.")
 
     args = parser.parse_args()
+
+    if args.dossier:
+        if args.in_dir is None:
+            args.in_dir = args.dossier / "in"
+        if args.gpx_dir is None:
+            args.gpx_dir = args.dossier / "gpx"
+        if args.out_dir is None:
+            args.out_dir = args.dossier / "out"
+        if args.manifest is None:
+            args.manifest = args.dossier / "manifest.json"
+
+    if args.in_dir is None:
+        print("✗ --in-dir ou --dossier requis", file=sys.stderr)
+        sys.exit(1)
 
     photos = collect_photos(args.in_dir)
     if not photos:
@@ -695,7 +716,7 @@ def main():
         return
 
     if not args.out_dir:
-        print("✗ --out-dir est requis (hors --list-dates / --init-manifest)", file=sys.stderr)
+        print("✗ --out-dir ou --dossier est requis (hors --list-dates / --init-manifest)", file=sys.stderr)
         sys.exit(1)
 
     args.out_dir.mkdir(parents=True, exist_ok=True)
