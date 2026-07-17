@@ -24,60 +24,75 @@ stats ; si aucune place n'est disponible dans ces bornes, la collision est assum
 
 ## Flux — mode par date (défaut si les photos couvrent plusieurs dates)
 
-### 1. Demander le dossier d'entrée, le dossier de sortie, le nom de l'événement
-Le nom de l'événement (pavé "GARMIN" remplacé) et la couleur d'accent restent
-**uniformes** sur tout le lot, même en mode par date.
+Trois étapes strictement séquentielles : initialiser → compléter → générer sur le
+**go explicite** de Denis (jamais de génération automatique dès que le manifest est complet).
 
-### 2. Lister les dates
+### 1. Initialiser le manifest
+Demander le dossier d'entrée, le dossier de sortie, le nom de l'événement (pavé
+"GARMIN" remplacé) et la couleur d'accent optionnelle — ces deux derniers sont
+**globaux** (uniformes sur tout le lot). Demander aussi où se trouvent les fichiers
+GPX s'ils ne sont pas dans le dossier d'entrée (`--gpx-dir`).
+
 ```bash
-"$PY" "$SCRIPT" --in-dir "<dossier-entrée>" --list-dates [--manifest "<manifest.json>"]
+"$PY" "$SCRIPT" --in-dir "<dossier-entrée>" --init-manifest \
+  --event-name "<Nom-Événement>" [--couleur "<optionnel>"] [--gpx-dir "<dossier-gpx>"] \
+  [--manifest "<manifest.json>"]
 ```
-Donne, pour chaque date détectée (triée croissante) : nombre de photos, statut dans
-le manifest (`présent`/`absent`), noms de fichiers.
+
+Le script scanne les photos (regroupées par date) et les fichiers `.gpx` du dossier
+indiqué, rapproche chaque GPX de sa date (date du premier point du tracé) et écrit/
+complète le manifest : `event_name`/`couleur` globaux, une entrée par date détectée
+(`titre`/`lieu` vides, `stat: []`, `gpx` renseigné si un fichier a été rapproché).
+**Idempotent** : une date ou un champ déjà renseigné (y compris `event_name`/`couleur`
+si `--event-name`/`--couleur` ne sont pas refournis) n'est jamais écrasé. Un GPX dont
+la date ne correspond à aucune photo est ignoré — le signaler à Denis s'il s'attendait
+à un rapprochement.
 
 Manifest par défaut : `<dossier-entrée>/manifest.json` (co-localisé avec les photos,
 sauf si Denis précise un autre chemin — utile pour rejouer/compléter le lot plus tard).
 
-### 3. Compléter le manifest — uniquement les dates `absent`
-Pour chaque date signalée `absent` (dans l'ordre chronologique), demander à Denis :
-titre, lieu, et les statistiques à afficher (mêmes règles qu'en mode uniforme :
-dénivelé +/- regroupés sur une ligne si les deux sont fournis, ne rien inventer).
-Poser ces questions **en une seule fois pour toutes les dates manquantes** plutôt que
-d'enchaîner les allers-retours, sauf si Denis préfère répondre au fur et à mesure.
+La sortie du script liste, pour chaque date : nombre de photos, statut
+(`rempli`/`à compléter`), et le GPX rapproché le cas échéant.
 
-Les dates déjà `présent` dans le manifest ne sont **jamais** redemandées : leurs
-valeurs existantes sont conservées telles quelles.
+### 2. Compléter le manifest — uniquement les dates `à compléter`
+Pour chaque date signalée `à compléter` (dans l'ordre chronologique), demander à
+Denis : titre, lieu, et les statistiques à afficher (dénivelé +/- regroupés sur une
+ligne si les deux sont fournis, ne rien inventer). Poser ces questions **en une seule
+fois pour toutes les dates manquantes** plutôt que d'enchaîner les allers-retours,
+sauf si Denis préfère répondre au fur et à mesure.
 
-Écrire/mettre à jour le fichier manifest (`Write`/`Edit`) au format :
+Les dates déjà `rempli` ne sont **jamais** redemandées : leurs valeurs existantes sont
+conservées telles quelles. Si un GPX rapproché automatiquement à l'étape 1 semble
+incorrect (mauvaise date), le signaler à Denis plutôt que de le corriger silencieusement.
+
+Écrire les réponses dans le manifest (`Edit`), format d'une entrée de date :
 ```json
-{
-  "2025-11-10": {
-    "titre": "J1 - ...",
-    "lieu": "...",
-    "stat": ["DURÉE|5h30|", "DISTANCE|18|km"],
-    "gpx": "in/activity_XXXX.gpx"
-  },
-  "2025-11-11": { "titre": "...", "lieu": "...", "stat": [] }
+"2025-11-10": {
+  "titre": "J1 - ...",
+  "lieu": "...",
+  "stat": ["DURÉE|5h30|", "DISTANCE|18|km"],
+  "gpx": "in/activity_XXXX.gpx"
 }
 ```
 `stat` suit le format `LABEL|VALEUR|UNITÉ` (même syntaxe qu'en CLI), liste vide si
-aucune stat pour cette date. `gpx` est optionnel — chemin vers un fichier GPX (absolu,
-ou relatif au dossier du manifest) ; si absent, aucun tracé n'est dessiné pour cette
-date. Ne jamais deviner ou réutiliser le GPX d'une autre date.
+aucune stat pour cette date.
 
-### 4. Exécuter le rendu
+### 3. Demander confirmation, puis générer
+Une fois toutes les dates `rempli`, résumer à Denis ce qui va être généré (nombre de
+dates, nombre de photos, event/couleur) et **attendre son go explicite** avant de lancer
+le rendu — ne jamais enchaîner automatiquement après l'étape 2.
+
 ```bash
 "$PY" "$SCRIPT" --in-dir "<dossier-entrée>" --out-dir "<dossier-sortie>" \
-  --event-name "<Nom-Événement>" --manifest "<manifest.json>" \
-  --couleur "<optionnel>"
+  --manifest "<manifest.json>"
 ```
-Le script regroupe les photos par date, applique le titre/lieu/stats de la date
-correspondante, et échoue explicitement si une date du dossier n'est pas dans le
-manifest (ne devrait pas arriver après l'étape 3). Génère systématiquement les
-versions gauche et droite par photo.
+`--event-name`/`--couleur` ne sont plus nécessaires ici (lus depuis le manifest) ; ne
+les refournir que si Denis veut explicitement les changer par rapport à l'étape 1. Le
+script échoue explicitement si une date du dossier est absente du manifest, ou si son
+titre/lieu est vide (garde-fou si l'étape 2 n'est pas terminée). Génère systématiquement
+les versions gauche et droite par photo.
 
-### 5. Montrer le résultat
-Afficher au moins une paire gauche/droite par date distincte générée, annoncer le
+Montrer au moins une paire gauche/droite par date distincte générée, annoncer le
 dossier de sortie et le nombre total d'images produites.
 
 ## Flux — mode uniforme (une seule date, ou lot homogène)
@@ -132,7 +147,12 @@ stats ; le texte du nom d'événement bascule automatiquement noir/blanc pour le
   des photos sources.
 - Ne pas inventer de données d'activité manquantes — omettre la ligne plutôt que
   de fabriquer une valeur.
-- Ne jamais redemander une date déjà présente dans le manifest ; ne jamais écraser
-  silencieusement une entrée existante du manifest sans confirmation de Denis.
+- Ne jamais redemander une date déjà `rempli` dans le manifest ; ne jamais écraser
+  silencieusement une entrée existante (titre/lieu/stat/gpx/event_name/couleur) sans
+  confirmation de Denis — `--init-manifest` est idempotent par conception, mais toute
+  correction manuelle d'un champ déjà rempli doit être explicitement validée par Denis.
+- **Jamais de génération sans le go explicite de Denis** après l'étape 2 (compléter le
+  manifest) — même si toutes les dates sont `rempli`.
 - Opération sans risque (pas de suppression, pas de modification de fichiers
-  existants hors manifest) — aucune validation préalable requise avant exécution.
+  existants hors manifest) — aucune validation préalable requise avant `--init-manifest`
+  ou `--list-dates` ; seule la génération finale attend le go de Denis.

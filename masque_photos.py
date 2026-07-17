@@ -26,6 +26,7 @@ stats-à-droite par photo, dans --out-dir :
 import argparse
 import json
 import math
+import os
 import re
 import sys
 import xml.etree.ElementTree as ET
@@ -326,6 +327,31 @@ def load_gpx_track(path: Path) -> list[tuple[float, float]]:
     return points
 
 
+def gpx_first_date(path: Path) -> date | None:
+    """Date (UTC, sans repli fuseau horaire) du premier point d'un fichier GPX."""
+    tree = ET.parse(path)
+    for trkpt in tree.getroot().iter():
+        if trkpt.tag.endswith("trkpt"):
+            for child in trkpt:
+                if child.tag.endswith("time"):
+                    return datetime.fromisoformat(child.text.replace("Z", "+00:00")).date()
+    return None
+
+
+def match_gpx_files(gpx_dir: Path, manifest_dir: Path, photo_dates: set[str]) -> dict[str, str]:
+    """Associe chaque fichier .gpx de `gpx_dir` à la date ISO (parmi `photo_dates`) de
+    son premier point, en chemin relatif à `manifest_dir`. Un GPX dont la date ne
+    correspond à aucune date de photo est ignoré (rapprochement manuel si besoin)."""
+    mapping: dict[str, str] = {}
+    if not gpx_dir.is_dir():
+        return mapping
+    for gpx in sorted(gpx_dir.glob("*.gpx")):
+        d = gpx_first_date(gpx)
+        if d and d.isoformat() in photo_dates:
+            mapping[d.isoformat()] = os.path.relpath(gpx, manifest_dir)
+    return mapping
+
+
 def project_track(points: list[tuple[float, float]], box_w: float, box_h: float,
                    pad_frac: float = 0.1) -> list[tuple[float, float]]:
     """Projette les points lat/lon dans une boîte de box_w x box_h pixels (coordonnées
@@ -527,8 +553,12 @@ def main():
     parser = argparse.ArgumentParser(description="Compose un habillage type Garmin sur une ou plusieurs photos.")
     parser.add_argument("--in-dir", required=True, type=Path,
                          help="Photo unique ou dossier de photos à traiter (traitement de masse si dossier)")
-    parser.add_argument("--out-dir", type=Path, help="Dossier de sortie (requis hors --list-dates)")
-    parser.add_argument("--event-name", default="GARMIN", help="Nom d'événement (pavé blanc en haut à droite)")
+    parser.add_argument("--out-dir", type=Path,
+                         help="Dossier de sortie (requis hors --list-dates / --init-manifest)")
+    parser.add_argument("--event-name", default=None,
+                         help="Nom d'événement (pavé blanc en haut à droite). Mode --manifest : écrit/mis à "
+                              "jour dans le manifest par --init-manifest, prioritaire sur la valeur déjà "
+                              "présente. Défaut si absent partout : GARMIN.")
     parser.add_argument("--titre", default=None, help="Titre de l'activité (mode uniforme, sans --manifest)")
     parser.add_argument("--date-heure", default=None,
                          help="Date, ex. '2 mai 2026'. Si omis, dérivée automatiquement de l'EXIF de "
@@ -539,16 +569,27 @@ def main():
     parser.add_argument("--couleur", default=None,
                          help="Couleur d'accent (nom PIL ou hexa '#FF6600'), appliquée au fond du pavé "
                               "événement, au titre et aux stats. Le texte du nom d'événement bascule "
-                              "automatiquement en noir ou blanc selon le contraste. Défaut : blanc / fond noir.")
+                              "automatiquement en noir ou blanc selon le contraste. Défaut : blanc / fond noir. "
+                              "Mode --manifest : mêmes règles de priorité que --event-name.")
     parser.add_argument("--gpx", type=Path, default=None,
                          help="Fichier GPX de l'activité (mode uniforme) — trace un tracé GPS stylisé "
                               "sur la photo. En mode --manifest, indiquer plutôt une clé 'gpx' par date.")
     parser.add_argument("--manifest", type=Path, default=None,
-                         help="JSON {date_iso: {titre, lieu, stat: [...]}} — un habillage par date de prise "
-                              "de vue plutôt qu'un habillage uniforme. Prioritaire sur --titre/--lieu/--stat.")
+                         help="JSON {event_name, couleur, dates: {date_iso: {titre, lieu, stat, gpx}}} — un "
+                              "habillage par date de prise de vue plutôt qu'un habillage uniforme. Prioritaire "
+                              "sur --titre/--lieu/--stat. Voir --init-manifest pour le générer.")
     parser.add_argument("--list-dates", action="store_true",
                          help="N'affiche que les dates détectées dans --in-dir (avec leur statut dans "
                               "--manifest s'il est fourni) et quitte, sans rien générer.")
+    parser.add_argument("--init-manifest", action="store_true",
+                         help="Scanne --in-dir (photos) et --gpx-dir (fichiers .gpx), crée ou complète "
+                              "--manifest : une entrée par date détectée (titre/lieu/stat vides à compléter, "
+                              "gpx rapproché automatiquement par date de premier point). N'écrase jamais une "
+                              "entrée de date déjà présente ni event_name/couleur déjà renseignés (sauf si "
+                              "--event-name/--couleur fournis explicitement). Quitte sans générer d'image.")
+    parser.add_argument("--gpx-dir", type=Path, default=None,
+                         help="Dossier des fichiers .gpx à rapprocher des dates (mode --init-manifest). "
+                              "Défaut : --in-dir.")
 
     args = parser.parse_args()
 
@@ -560,7 +601,7 @@ def main():
     if args.list_dates:
         manifest_keys = set()
         if args.manifest and args.manifest.exists():
-            manifest_keys = set(json.loads(args.manifest.read_text()).keys())
+            manifest_keys = set(json.loads(args.manifest.read_text()).get("dates", {}).keys())
         groups = group_by_date(photos)
         for key in sorted(groups):
             statut = "présent" if key in manifest_keys else "absent"
@@ -568,26 +609,71 @@ def main():
             print(f"{key} | {len(groups[key])} photo(s) | manifest: {statut} | {noms}")
         return
 
+    if args.init_manifest:
+        manifest_path = args.manifest or (args.in_dir / "manifest.json")
+        content = json.loads(manifest_path.read_text()) if manifest_path.exists() else {}
+        if args.event_name:
+            content["event_name"] = args.event_name
+        else:
+            content.setdefault("event_name", "GARMIN")
+        if args.couleur:
+            content["couleur"] = args.couleur
+        else:
+            content.setdefault("couleur", None)
+        dates = content.setdefault("dates", {})
+
+        groups = group_by_date(photos)
+        photo_dates = {k for k in groups if k != NO_DATE_KEY}
+        gpx_dir = args.gpx_dir or args.in_dir
+        gpx_matches = match_gpx_files(gpx_dir, manifest_path.parent, photo_dates)
+
+        for key in sorted(photo_dates):
+            entry = dates.setdefault(key, {"titre": "", "lieu": "", "stat": []})
+            if "gpx" not in entry and key in gpx_matches:
+                entry["gpx"] = gpx_matches[key]
+
+        manifest_path.parent.mkdir(parents=True, exist_ok=True)
+        manifest_path.write_text(json.dumps(content, ensure_ascii=False, indent=2) + "\n")
+
+        print(f"✓ Manifest : {manifest_path}")
+        print(f"  Événement : {content['event_name']}   Couleur : {content['couleur'] or '(défaut, blanc)'}")
+        for key in sorted(dates):
+            entry = dates[key]
+            statut = "à compléter" if not entry.get("titre") or not entry.get("lieu") else "rempli"
+            gpx_info = entry["gpx"] if entry.get("gpx") else "aucun"
+            n_photos = len(groups.get(key, []))
+            print(f"  {key} | {n_photos} photo(s) | {statut} | gpx: {gpx_info}")
+        return
+
     if not args.out_dir:
-        print("✗ --out-dir est requis (hors --list-dates)", file=sys.stderr)
+        print("✗ --out-dir est requis (hors --list-dates / --init-manifest)", file=sys.stderr)
         sys.exit(1)
 
-    accent = parse_color(args.couleur) if args.couleur else WHITE
     args.out_dir.mkdir(parents=True, exist_ok=True)
 
     if args.manifest:
         if not args.manifest.exists():
             print(f"✗ Manifest introuvable : {args.manifest}", file=sys.stderr)
             sys.exit(1)
-        manifest = json.loads(args.manifest.read_text())
+        content = json.loads(args.manifest.read_text())
+        event_name = args.event_name or content.get("event_name") or "GARMIN"
+        couleur = args.couleur or content.get("couleur")
+        accent = parse_color(couleur) if couleur else WHITE
+        dates_map = content.get("dates", {})
+
         groups = group_by_date(photos)
-        missing = [k for k in groups if k not in manifest]
+        missing = [k for k in groups if k not in dates_map]
         if missing:
             print(f"✗ Dates absentes du manifest : {', '.join(sorted(missing))}", file=sys.stderr)
             sys.exit(1)
+        incomplete = [k for k in groups if not dates_map[k].get("titre") or not dates_map[k].get("lieu")]
+        if incomplete:
+            print(f"✗ Manifest incomplet (titre/lieu manquant) pour : {', '.join(sorted(incomplete))}",
+                  file=sys.stderr)
+            sys.exit(1)
 
         for key in sorted(groups):
-            entry = manifest[key]
+            entry = dates_map[key]
             titre = entry["titre"]
             lieu = entry["lieu"]
             stats = [parse_stat(s) for s in entry.get("stat", [])]
@@ -607,7 +693,7 @@ def main():
             for photo in groups[key]:
                 for position in ("gauche", "droite"):
                     out_path = args.out_dir / f"{photo.stem}-{position}.png"
-                    render_one(photo, out_path, args.event_name, titre, date_heure, lieu,
+                    render_one(photo, out_path, event_name, titre, date_heure, lieu,
                                stats, accent, position, track=track)
                     print(f"✓ Image : {out_path}")
         return
@@ -616,6 +702,8 @@ def main():
         print("✗ --titre et --lieu sont requis (ou fournir --manifest)", file=sys.stderr)
         sys.exit(1)
 
+    event_name = args.event_name or "GARMIN"
+    accent = parse_color(args.couleur) if args.couleur else WHITE
     stats = [parse_stat(s) for s in args.stat]
 
     track = None
@@ -632,7 +720,7 @@ def main():
             print(f"⚠ Date introuvable (EXIF et nom de fichier) pour {photo.name} — sous-titre sans date", file=sys.stderr)
         for position in ("gauche", "droite"):
             out_path = args.out_dir / f"{photo.stem}-{position}.png"
-            render_one(photo, out_path, args.event_name, args.titre, date_heure, args.lieu,
+            render_one(photo, out_path, event_name, args.titre, date_heure, args.lieu,
                        stats, accent, position, track=track)
             print(f"✓ Image : {out_path}")
 
