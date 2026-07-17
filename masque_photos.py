@@ -338,28 +338,33 @@ def gpx_first_date(path: Path) -> date | None:
     return None
 
 
-def match_gpx_files(gpx_dir: Path, manifest_dir: Path, photo_dates: set[str]) -> dict[str, str]:
-    """Associe chaque fichier .gpx de `gpx_dir` à la date ISO (parmi `photo_dates`) de
-    son premier point, en chemin relatif à `manifest_dir`. Un GPX dont la date ne
-    correspond à aucune date de photo est ignoré (rapprochement manuel si besoin)."""
-    mapping: dict[str, str] = {}
+def match_gpx_files(gpx_dir: Path, manifest_dir: Path, photo_dates: set[str]) -> dict[str, list[str]]:
+    """Associe les fichiers .gpx de `gpx_dir` aux dates ISO (parmi `photo_dates`) de
+    leur premier point, en chemins relatifs à `manifest_dir`. Une date peut recevoir
+    plusieurs fichiers (ex. deux activités le même jour, non contiguës) — tous sont
+    conservés, dans l'ordre. Un GPX dont la date ne correspond à aucune date de photo
+    est ignoré (rapprochement manuel si besoin)."""
+    mapping: dict[str, list[str]] = {}
     if not gpx_dir.is_dir():
         return mapping
     for gpx in sorted(gpx_dir.glob("*.gpx")):
         d = gpx_first_date(gpx)
         if d and d.isoformat() in photo_dates:
-            mapping[d.isoformat()] = os.path.relpath(gpx, manifest_dir)
+            mapping.setdefault(d.isoformat(), []).append(os.path.relpath(gpx, manifest_dir))
     return mapping
 
 
-def project_track(points: list[tuple[float, float]], box_w: float, box_h: float,
-                   pad_frac: float = 0.1) -> list[tuple[float, float]]:
-    """Projette les points lat/lon dans une boîte de box_w x box_h pixels (coordonnées
-    relatives à l'origine de la boîte), en conservant les proportions réelles du
-    tracé — la longitude est corrigée par cos(latitude moyenne) pour éviter toute
-    déformation est-ouest."""
-    lats = [p[0] for p in points]
-    lons = [p[1] for p in points]
+def project_tracks(segments: list[list[tuple[float, float]]], box_w: float, box_h: float,
+                    pad_frac: float = 0.1) -> list[list[tuple[float, float]]]:
+    """Projette plusieurs tracés lat/lon (ex. deux activités distinctes le même jour)
+    dans une boîte de box_w x box_h pixels partagée (coordonnées relatives à l'origine
+    de la boîte), en conservant les proportions réelles à une échelle commune — la
+    longitude est corrigée par cos(latitude moyenne) pour éviter toute déformation
+    est-ouest. Chaque segment reste une polyligne séparée (pas de trait de liaison
+    entre deux tracés distincts)."""
+    all_points = [p for seg in segments for p in seg]
+    lats = [p[0] for p in all_points]
+    lons = [p[1] for p in all_points]
     lon_scale = math.cos(math.radians(sum(lats) / len(lats)))
 
     xs = [lon * lon_scale for lon in lons]
@@ -378,7 +383,14 @@ def project_track(points: list[tuple[float, float]], box_w: float, box_h: float,
     offset_x = (box_w - draw_w) / 2
     offset_y = (box_h - draw_h) / 2
 
-    return [(offset_x + (x - min_x) * scale, offset_y + (y - min_y) * scale) for x, y in zip(xs, ys)]
+    out = []
+    for seg in segments:
+        pts = []
+        for lat, lon in seg:
+            x, y = lon * lon_scale, -lat
+            pts.append((offset_x + (x - min_x) * scale, offset_y + (y - min_y) * scale))
+        out.append(pts)
+    return out
 
 
 def detect_face_bands(img: Image.Image) -> list[tuple[float, float]]:
@@ -430,34 +442,9 @@ def choose_track_band_top(face_bands: list[tuple[float, float]], band_h: float, 
     return default_top  # aucune place disponible dans les bornes, collision assumée
 
 
-def draw_gps_track_zone(img: Image.Image, points: list[tuple[float, float]],
-                         color: tuple[int, int, int, int] = WHITE):
-    """Dessine un tracé GPS stylisé : ligne + point de départ + flèche d'arrivée,
-    sur une bande horizontale de la photo. Le tracé est mis à l'échelle pour
-    tenir dans sa boîte, pas projeté sur le terrain réel de la photo (aucune
-    donnée de pose de caméra disponible pour un ancrage fidèle). La bande est
-    repositionnée verticalement (au-dessus ou en dessous) si elle croiserait un
-    visage détecté, dans la limite de la zone [top_bound, bottom_bound] laissée
-    libre par le bandeau titre et le bloc stats."""
-    w, h = img.size
-    base = min(w, h)
-    band_h_frac, margin_x_frac = 0.22, 0.08
-    top_bound, bottom_bound, default_top = 0.16, 0.62, 0.28
-
-    face_bands = detect_face_bands(img)
-    top_frac = choose_track_band_top(face_bands, band_h_frac, top_bound, bottom_bound, default_top)
-
-    box_w = w * (1 - 2 * margin_x_frac)
-    box_h = h * band_h_frac
-    origin_x, origin_y = w * margin_x_frac, h * top_frac
-
-    rel_points = project_track(points, box_w, box_h)
-    pts = [(origin_x + x, origin_y + y) for x, y in rel_points]
-
-    layer = Image.new("RGBA", img.size, (0, 0, 0, 0))
-    ldraw = ImageDraw.Draw(layer)
-
-    line_w = max(2, round(base * 0.006))
+def _draw_track_segment(ldraw: ImageDraw.ImageDraw, pts: list[tuple[float, float]],
+                         color: tuple[int, int, int, int], line_w: int):
+    """Dessine une polyligne + point de départ + flèche d'arrivée pour un seul segment."""
     shadow_w = line_w + max(2, round(line_w * 1.8))
     ldraw.line(pts, fill=(0, 0, 0, 110), width=shadow_w, joint="curve")
     ldraw.line(pts, fill=color, width=line_w, joint="curve")
@@ -478,6 +465,39 @@ def draw_gps_track_zone(img: Image.Image, points: list[tuple[float, float]],
     triangle = [(ex, ey), (bx + perp_x * arrow_w, by + perp_y * arrow_w),
                 (bx - perp_x * arrow_w, by - perp_y * arrow_w)]
     ldraw.polygon(triangle, fill=color)
+
+
+def draw_gps_track_zone(img: Image.Image, segments: list[list[tuple[float, float]]],
+                         color: tuple[int, int, int, int] = WHITE):
+    """Dessine un ou plusieurs tracés GPS stylisés (ex. deux activités distinctes le
+    même jour) : ligne + point de départ + flèche d'arrivée par segment, sur une
+    bande horizontale de la photo, à une échelle commune. Les tracés sont mis à
+    l'échelle pour tenir dans leur boîte, pas projetés sur le terrain réel de la
+    photo (aucune donnée de pose de caméra disponible pour un ancrage fidèle). La
+    bande est repositionnée verticalement (au-dessus ou en dessous) si elle
+    croiserait un visage détecté, dans la limite de la zone [top_bound, bottom_bound]
+    laissée libre par le bandeau titre et le bloc stats."""
+    w, h = img.size
+    base = min(w, h)
+    band_h_frac, margin_x_frac = 0.22, 0.08
+    top_bound, bottom_bound, default_top = 0.16, 0.62, 0.28
+
+    face_bands = detect_face_bands(img)
+    top_frac = choose_track_band_top(face_bands, band_h_frac, top_bound, bottom_bound, default_top)
+
+    box_w = w * (1 - 2 * margin_x_frac)
+    box_h = h * band_h_frac
+    origin_x, origin_y = w * margin_x_frac, h * top_frac
+
+    rel_segments = project_tracks(segments, box_w, box_h)
+
+    layer = Image.new("RGBA", img.size, (0, 0, 0, 0))
+    ldraw = ImageDraw.Draw(layer)
+    line_w = max(2, round(base * 0.006))
+
+    for rel_points in rel_segments:
+        pts = [(origin_x + x, origin_y + y) for x, y in rel_points]
+        _draw_track_segment(ldraw, pts, color, line_w)
 
     img.alpha_composite(layer)
 
@@ -516,7 +536,7 @@ def group_by_date(photos: list[Path]) -> dict[str, list[Path]]:
 
 def render_one(photo: Path, out_path: Path, event_name: str, titre: str, date_heure: str, lieu: str,
                stats: list[tuple[str, str, str]], accent: tuple[int, int, int, int], position: str,
-               track: list[tuple[float, float]] | None = None):
+               track: list[list[tuple[float, float]]] | None = None):
     titre = sanitize_text(titre, FONT_BOLD)
     event_name = sanitize_text(event_name, FONT_BOLD)
     lieu = sanitize_text(lieu, FONT_REGULAR)
@@ -571,9 +591,11 @@ def main():
                               "événement, au titre et aux stats. Le texte du nom d'événement bascule "
                               "automatiquement en noir ou blanc selon le contraste. Défaut : blanc / fond noir. "
                               "Mode --manifest : mêmes règles de priorité que --event-name.")
-    parser.add_argument("--gpx", type=Path, default=None,
+    parser.add_argument("--gpx", type=Path, action="append", default=[],
                          help="Fichier GPX de l'activité (mode uniforme) — trace un tracé GPS stylisé "
-                              "sur la photo. En mode --manifest, indiquer plutôt une clé 'gpx' par date.")
+                              "sur la photo. Répétable si plusieurs activités distinctes (segments "
+                              "dessinés séparément, à échelle commune). En mode --manifest, indiquer "
+                              "plutôt une clé 'gpx' par date (chaîne ou liste de chaînes).")
     parser.add_argument("--manifest", type=Path, default=None,
                          help="JSON {event_name, couleur, dates: {date_iso: {titre, lieu, stat, gpx}}} — un "
                               "habillage par date de prise de vue plutôt qu'un habillage uniforme. Prioritaire "
@@ -630,7 +652,8 @@ def main():
         for key in sorted(photo_dates):
             entry = dates.setdefault(key, {"titre": "", "lieu": "", "stat": []})
             if "gpx" not in entry and key in gpx_matches:
-                entry["gpx"] = gpx_matches[key]
+                matches = gpx_matches[key]
+                entry["gpx"] = matches[0] if len(matches) == 1 else matches
 
         manifest_path.parent.mkdir(parents=True, exist_ok=True)
         manifest_path.write_text(json.dumps(content, ensure_ascii=False, indent=2) + "\n")
@@ -640,7 +663,13 @@ def main():
         for key in sorted(dates):
             entry = dates[key]
             statut = "à compléter" if not entry.get("titre") or not entry.get("lieu") else "rempli"
-            gpx_info = entry["gpx"] if entry.get("gpx") else "aucun"
+            gpx_entry = entry.get("gpx")
+            if not gpx_entry:
+                gpx_info = "aucun"
+            elif isinstance(gpx_entry, list):
+                gpx_info = f"{len(gpx_entry)} activités (" + ", ".join(gpx_entry) + ")"
+            else:
+                gpx_info = gpx_entry
             n_photos = len(groups.get(key, []))
             print(f"  {key} | {n_photos} photo(s) | {statut} | gpx: {gpx_info}")
         return
@@ -682,13 +711,16 @@ def main():
             track = None
             gpx_raw = entry.get("gpx")
             if gpx_raw:
-                gpx_path = Path(gpx_raw)
-                if not gpx_path.is_absolute():
-                    gpx_path = args.manifest.parent / gpx_path
-                if not gpx_path.exists():
-                    print(f"✗ GPX introuvable pour {key} : {gpx_path}", file=sys.stderr)
-                    sys.exit(1)
-                track = load_gpx_track(gpx_path)
+                gpx_list = [gpx_raw] if isinstance(gpx_raw, str) else gpx_raw
+                track = []
+                for raw in gpx_list:
+                    gpx_path = Path(raw)
+                    if not gpx_path.is_absolute():
+                        gpx_path = args.manifest.parent / gpx_path
+                    if not gpx_path.exists():
+                        print(f"✗ GPX introuvable pour {key} : {gpx_path}", file=sys.stderr)
+                        sys.exit(1)
+                    track.append(load_gpx_track(gpx_path))
 
             for photo in groups[key]:
                 for position in ("gauche", "droite"):
@@ -708,10 +740,12 @@ def main():
 
     track = None
     if args.gpx:
-        if not args.gpx.exists():
-            print(f"✗ GPX introuvable : {args.gpx}", file=sys.stderr)
-            sys.exit(1)
-        track = load_gpx_track(args.gpx)
+        track = []
+        for gpx_path in args.gpx:
+            if not gpx_path.exists():
+                print(f"✗ GPX introuvable : {gpx_path}", file=sys.stderr)
+                sys.exit(1)
+            track.append(load_gpx_track(gpx_path))
 
     for photo in photos:
         d = photo_date(photo)

@@ -5,3 +5,5 @@ __pycache__/
 *.zip
 3-col-khumbu/
 manifest.json
+in/
+out/

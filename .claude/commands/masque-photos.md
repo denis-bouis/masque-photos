@@ -119,6 +119,19 @@ un habillage identique pour tout le lot, sauter le manifest :
 `--date-heure` omis ⇒ date dérivée automatiquement de l'EXIF de chaque photo (repli
 sur le nom de fichier `YYYYMMDD_HHMMSS`), **sans l'heure** dans le sous-titre affiché.
 
+## Script compagnon — export des GPX depuis Garmin Connect
+
+`~/Dev/masque-photos/export_garmin_gpx.py` télécharge en masse les fichiers GPX des
+activités Garmin Connect existant entre deux dates, en vue de leur utilisation par
+`--gpx-dir` à l'étape 1. Denis le lance lui-même dans un terminal (identifiants et
+code MFA saisis interactivement, jamais via la compétence) :
+```bash
+"$PY" ~/Dev/masque-photos/export_garmin_gpx.py --debut AAAA-MM-JJ --fin AAAA-MM-JJ --out-dir "<dossier-gpx>"
+```
+Ne pas orchestrer ce script depuis la compétence (authentification Garmin
+interactive à un service tiers) — seulement le mentionner à Denis s'il a besoin de
+récupérer des GPX avant l'étape 1.
+
 ## Variables
 
 - Python : `~/Dev/masque-photos/.venv/bin/python`
