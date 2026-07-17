@@ -12,6 +12,16 @@ Deux modes :
   date de prise de vue a son propre titre/lieu/stats, mémorisés dans un fichier
   manifest JSON réutilisable d'une session à l'autre.
 
+Tracé GPS optionnel : si Denis fournit un ou plusieurs fichiers GPX, le script trace
+un tracé GPS stylisé (ligne + point de départ + flèche d'arrivée) sur une bande
+horizontale de la photo (22% de la hauteur, positionnée à 28% par défaut). Le tracé
+est mis à l'échelle pour tenir dans sa boîte — **pas** projeté sur le terrain réel de
+la photo (aucune donnée de pose caméra disponible). Détection de visage (OpenCV,
+optionnelle) : si la bande par défaut croiserait un visage détecté, elle est déplacée
+au-dessus ou en dessous selon la place disponible entre le bandeau titre et le bloc
+stats ; si aucune place n'est disponible dans ces bornes, la collision est assumée
+(rare). Sans opencv installé, dégradation silencieuse vers la position par défaut.
+
 ## Flux — mode par date (défaut si les photos couvrent plusieurs dates)
 
 ### 1. Demander le dossier d'entrée, le dossier de sortie, le nom de l'événement
@@ -44,13 +54,16 @@ valeurs existantes sont conservées telles quelles.
   "2025-11-10": {
     "titre": "J1 - ...",
     "lieu": "...",
-    "stat": ["DURÉE|5h30|", "DISTANCE|18|km"]
+    "stat": ["DURÉE|5h30|", "DISTANCE|18|km"],
+    "gpx": "in/activity_XXXX.gpx"
   },
   "2025-11-11": { "titre": "...", "lieu": "...", "stat": [] }
 }
 ```
 `stat` suit le format `LABEL|VALEUR|UNITÉ` (même syntaxe qu'en CLI), liste vide si
-aucune stat pour cette date.
+aucune stat pour cette date. `gpx` est optionnel — chemin vers un fichier GPX (absolu,
+ou relatif au dossier du manifest) ; si absent, aucun tracé n'est dessiné pour cette
+date. Ne jamais deviner ou réutiliser le GPX d'une autre date.
 
 ### 4. Exécuter le rendu
 ```bash
@@ -84,7 +97,8 @@ un habillage identique pour tout le lot, sauter le manifest :
   --stat "DISTANCE|<valeur>|km" \
   --stat "DÉNIVELÉ + / -|<D+> / <D->|m" \
   --stat "ALTITUDE MIN / MAX|<min> / <max>|m" \
-  --couleur "<#RRGGBB-ou-nom, optionnel>"
+  --couleur "<#RRGGBB-ou-nom, optionnel>" \
+  --gpx "<fichier.gpx, optionnel>"
 ```
 
 `--date-heure` omis ⇒ date dérivée automatiquement de l'EXIF de chaque photo (repli

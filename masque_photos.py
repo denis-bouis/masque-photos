@@ -3,7 +3,10 @@
 Masque Photos — compose un habillage type Garmin (titre, logo/événement,
 statistiques) par-dessus une ou plusieurs photos.
 
-Prérequis : pip install Pillow fontTools
+Prérequis : pip install Pillow fontTools opencv-python-headless
+(opencv est optionnel — seulement nécessaire pour la détection de visage qui
+évite au tracé GPS de les traverser ; son absence dégrade silencieusement vers
+la position par défaut du tracé)
 
 Usage (une photo ou un dossier de photos ; le même habillage est appliqué à
 chacune) — génère systématiquement une version stats-à-gauche et une version
@@ -22,8 +25,10 @@ stats-à-droite par photo, dans --out-dir :
 
 import argparse
 import json
+import math
 import re
 import sys
+import xml.etree.ElementTree as ET
 from datetime import date, datetime
 from pathlib import Path
 
@@ -309,6 +314,148 @@ def draw_stats_zone(img: Image.Image, draw: ImageDraw.ImageDraw, stats: list[tup
         y += (vb[3] - vb[1]) + inter_stat_gap
 
 
+def load_gpx_track(path: Path) -> list[tuple[float, float]]:
+    """Points (lat, lon) d'un fichier GPX, dans l'ordre du tracé."""
+    tree = ET.parse(path)
+    points = []
+    for trkpt in tree.getroot().iter():
+        if trkpt.tag.endswith("trkpt"):
+            points.append((float(trkpt.attrib["lat"]), float(trkpt.attrib["lon"])))
+    if len(points) < 2:
+        raise ValueError(f"Tracé GPX vide ou insuffisant : {path}")
+    return points
+
+
+def project_track(points: list[tuple[float, float]], box_w: float, box_h: float,
+                   pad_frac: float = 0.1) -> list[tuple[float, float]]:
+    """Projette les points lat/lon dans une boîte de box_w x box_h pixels (coordonnées
+    relatives à l'origine de la boîte), en conservant les proportions réelles du
+    tracé — la longitude est corrigée par cos(latitude moyenne) pour éviter toute
+    déformation est-ouest."""
+    lats = [p[0] for p in points]
+    lons = [p[1] for p in points]
+    lon_scale = math.cos(math.radians(sum(lats) / len(lats)))
+
+    xs = [lon * lon_scale for lon in lons]
+    ys = [-lat for lat in lats]  # inverser : latitude croissante -> y décroissant (repère écran)
+
+    min_x, max_x = min(xs), max(xs)
+    min_y, max_y = min(ys), max(ys)
+    span_x = max(max_x - min_x, 1e-9)
+    span_y = max(max_y - min_y, 1e-9)
+
+    avail_w = box_w * (1 - 2 * pad_frac)
+    avail_h = box_h * (1 - 2 * pad_frac)
+    scale = min(avail_w / span_x, avail_h / span_y)
+
+    draw_w, draw_h = span_x * scale, span_y * scale
+    offset_x = (box_w - draw_w) / 2
+    offset_y = (box_h - draw_h) / 2
+
+    return [(offset_x + (x - min_x) * scale, offset_y + (y - min_y) * scale) for x, y in zip(xs, ys)]
+
+
+def detect_face_bands(img: Image.Image) -> list[tuple[float, float]]:
+    """Bandes verticales (fraction de hauteur, haut/bas) occupées par des visages
+    détectés dans `img`, pour éviter que le tracé GPS ne les traverse. Retourne
+    une liste vide si opencv n'est pas installé (dégradation silencieuse vers la
+    position par défaut du tracé) ou si aucun visage n'est détecté."""
+    try:
+        import cv2
+        import numpy as np
+    except ImportError:
+        return []
+    w, h = img.size
+    gray = np.array(img.convert("L"))
+    cascade = cv2.CascadeClassifier(cv2.data.haarcascades + "haarcascade_frontalface_default.xml")
+    min_side = max(20, int(w * 0.03))
+    faces = cascade.detectMultiScale(gray, scaleFactor=1.1, minNeighbors=5, minSize=(min_side, min_side))
+    return [(y / h, (y + fh) / h) for (_, y, _, fh) in faces]
+
+
+def choose_track_band_top(face_bands: list[tuple[float, float]], band_h: float, top_bound: float,
+                           bottom_bound: float, default_top: float, margin: float = 0.02) -> float:
+    """Position verticale (fraction de hauteur) de la bande du tracé GPS : la
+    position par défaut si elle ne croise aucun visage détecté, sinon la bande
+    est déplacée au-dessus ou en dessous des visages selon la place disponible
+    dans [top_bound, bottom_bound] (en dessous privilégié à égalité de place)."""
+    if not face_bands:
+        return default_top
+
+    face_top = min(b[0] for b in face_bands) - margin
+    face_bottom = max(b[1] for b in face_bands) + margin
+    default_bottom = default_top + band_h
+
+    if default_bottom <= face_top or default_top >= face_bottom:
+        return default_top  # pas de collision
+
+    above_top = face_top - band_h
+    above_ok = above_top >= top_bound
+
+    below_top = face_bottom
+    below_ok = below_top + band_h <= bottom_bound
+
+    if below_ok and above_ok:
+        return below_top if (below_top - default_top) <= (default_top - above_top) else above_top
+    if below_ok:
+        return below_top
+    if above_ok:
+        return above_top
+    return default_top  # aucune place disponible dans les bornes, collision assumée
+
+
+def draw_gps_track_zone(img: Image.Image, points: list[tuple[float, float]],
+                         color: tuple[int, int, int, int] = WHITE):
+    """Dessine un tracé GPS stylisé : ligne + point de départ + flèche d'arrivée,
+    sur une bande horizontale de la photo. Le tracé est mis à l'échelle pour
+    tenir dans sa boîte, pas projeté sur le terrain réel de la photo (aucune
+    donnée de pose de caméra disponible pour un ancrage fidèle). La bande est
+    repositionnée verticalement (au-dessus ou en dessous) si elle croiserait un
+    visage détecté, dans la limite de la zone [top_bound, bottom_bound] laissée
+    libre par le bandeau titre et le bloc stats."""
+    w, h = img.size
+    base = min(w, h)
+    band_h_frac, margin_x_frac = 0.22, 0.08
+    top_bound, bottom_bound, default_top = 0.16, 0.62, 0.28
+
+    face_bands = detect_face_bands(img)
+    top_frac = choose_track_band_top(face_bands, band_h_frac, top_bound, bottom_bound, default_top)
+
+    box_w = w * (1 - 2 * margin_x_frac)
+    box_h = h * band_h_frac
+    origin_x, origin_y = w * margin_x_frac, h * top_frac
+
+    rel_points = project_track(points, box_w, box_h)
+    pts = [(origin_x + x, origin_y + y) for x, y in rel_points]
+
+    layer = Image.new("RGBA", img.size, (0, 0, 0, 0))
+    ldraw = ImageDraw.Draw(layer)
+
+    line_w = max(2, round(base * 0.006))
+    shadow_w = line_w + max(2, round(line_w * 1.8))
+    ldraw.line(pts, fill=(0, 0, 0, 110), width=shadow_w, joint="curve")
+    ldraw.line(pts, fill=color, width=line_w, joint="curve")
+
+    dot_r = line_w * 1.9
+    sx, sy = pts[0]
+    ldraw.ellipse([sx - dot_r, sy - dot_r, sx + dot_r, sy + dot_r], fill=(0, 0, 0, 110))
+    ldraw.ellipse([sx - dot_r * 0.75, sy - dot_r * 0.75, sx + dot_r * 0.75, sy + dot_r * 0.75], fill=color)
+
+    ex, ey = pts[-1]
+    px, py = next(((x, y) for x, y in reversed(pts[:-1]) if (x, y) != (ex, ey)), (ex - 1, ey))
+    dx, dy = ex - px, ey - py
+    norm = math.hypot(dx, dy) or 1.0
+    dx, dy = dx / norm, dy / norm
+    perp_x, perp_y = -dy, dx
+    arrow_len, arrow_w = dot_r * 3.0, dot_r * 1.8
+    bx, by = ex - dx * arrow_len, ey - dy * arrow_len
+    triangle = [(ex, ey), (bx + perp_x * arrow_w, by + perp_y * arrow_w),
+                (bx - perp_x * arrow_w, by - perp_y * arrow_w)]
+    ldraw.polygon(triangle, fill=color)
+
+    img.alpha_composite(layer)
+
+
 def parse_stat(raw: str) -> tuple[str, str, str]:
     parts = raw.split("|")
     while len(parts) < 3:
@@ -342,7 +489,8 @@ def group_by_date(photos: list[Path]) -> dict[str, list[Path]]:
 
 
 def render_one(photo: Path, out_path: Path, event_name: str, titre: str, date_heure: str, lieu: str,
-               stats: list[tuple[str, str, str]], accent: tuple[int, int, int, int], position: str):
+               stats: list[tuple[str, str, str]], accent: tuple[int, int, int, int], position: str,
+               track: list[tuple[float, float]] | None = None):
     titre = sanitize_text(titre, FONT_BOLD)
     event_name = sanitize_text(event_name, FONT_BOLD)
     lieu = sanitize_text(lieu, FONT_REGULAR)
@@ -359,6 +507,10 @@ def render_one(photo: Path, out_path: Path, event_name: str, titre: str, date_he
     img = img.convert("RGBA")
 
     img = add_vertical_vignette(img, top_h_frac=0.22, bottom_h_frac=0.32)
+
+    if track:
+        draw_gps_track_zone(img, track, color=accent)
+
     draw = ImageDraw.Draw(img)
 
     draw_title_zone(img, draw, titre, date_heure, lieu, color=accent)
@@ -388,6 +540,9 @@ def main():
                          help="Couleur d'accent (nom PIL ou hexa '#FF6600'), appliquée au fond du pavé "
                               "événement, au titre et aux stats. Le texte du nom d'événement bascule "
                               "automatiquement en noir ou blanc selon le contraste. Défaut : blanc / fond noir.")
+    parser.add_argument("--gpx", type=Path, default=None,
+                         help="Fichier GPX de l'activité (mode uniforme) — trace un tracé GPS stylisé "
+                              "sur la photo. En mode --manifest, indiquer plutôt une clé 'gpx' par date.")
     parser.add_argument("--manifest", type=Path, default=None,
                          help="JSON {date_iso: {titre, lieu, stat: [...]}} — un habillage par date de prise "
                               "de vue plutôt qu'un habillage uniforme. Prioritaire sur --titre/--lieu/--stat.")
@@ -437,11 +592,23 @@ def main():
             lieu = entry["lieu"]
             stats = [parse_stat(s) for s in entry.get("stat", [])]
             date_heure = format_date_fr(date.fromisoformat(key)) if key != NO_DATE_KEY else ""
+
+            track = None
+            gpx_raw = entry.get("gpx")
+            if gpx_raw:
+                gpx_path = Path(gpx_raw)
+                if not gpx_path.is_absolute():
+                    gpx_path = args.manifest.parent / gpx_path
+                if not gpx_path.exists():
+                    print(f"✗ GPX introuvable pour {key} : {gpx_path}", file=sys.stderr)
+                    sys.exit(1)
+                track = load_gpx_track(gpx_path)
+
             for photo in groups[key]:
                 for position in ("gauche", "droite"):
                     out_path = args.out_dir / f"{photo.stem}-{position}.png"
                     render_one(photo, out_path, args.event_name, titre, date_heure, lieu,
-                               stats, accent, position)
+                               stats, accent, position, track=track)
                     print(f"✓ Image : {out_path}")
         return
 
@@ -451,6 +618,13 @@ def main():
 
     stats = [parse_stat(s) for s in args.stat]
 
+    track = None
+    if args.gpx:
+        if not args.gpx.exists():
+            print(f"✗ GPX introuvable : {args.gpx}", file=sys.stderr)
+            sys.exit(1)
+        track = load_gpx_track(args.gpx)
+
     for photo in photos:
         d = photo_date(photo)
         date_heure = args.date_heure or (format_date_fr(d) if d else "")
@@ -459,7 +633,7 @@ def main():
         for position in ("gauche", "droite"):
             out_path = args.out_dir / f"{photo.stem}-{position}.png"
             render_one(photo, out_path, args.event_name, args.titre, date_heure, args.lieu,
-                       stats, accent, position)
+                       stats, accent, position, track=track)
             print(f"✓ Image : {out_path}")
 
 
