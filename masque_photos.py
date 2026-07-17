@@ -338,6 +338,18 @@ def gpx_first_date(path: Path) -> date | None:
     return None
 
 
+def gpx_track_name(path: Path) -> str | None:
+    """Nom de piste (<trk><name>) d'un fichier GPX exporté par Garmin Connect, si
+    présent — reprend le nom donné à l'activité (souvent déjà descriptif)."""
+    tree = ET.parse(path)
+    for trk in tree.getroot():
+        if trk.tag.endswith("trk"):
+            for child in trk:
+                if child.tag.endswith("name") and child.text and child.text.strip():
+                    return child.text.strip()
+    return None
+
+
 def match_gpx_files(gpx_dir: Path, manifest_dir: Path, photo_dates: set[str]) -> dict[str, list[str]]:
     """Associe les fichiers .gpx de `gpx_dir` aux dates ISO (parmi `photo_dates`) de
     leur premier point, en chemins relatifs à `manifest_dir`. Une date peut recevoir
@@ -654,6 +666,14 @@ def main():
             if "gpx" not in entry and key in gpx_matches:
                 matches = gpx_matches[key]
                 entry["gpx"] = matches[0] if len(matches) == 1 else matches
+                if not entry.get("titre"):
+                    names = []
+                    for rel in matches:
+                        n = gpx_track_name(manifest_path.parent / rel)
+                        if n and n not in names:
+                            names.append(n)
+                    if names:
+                        entry["titre"] = " / ".join(names)
 
         manifest_path.parent.mkdir(parents=True, exist_ok=True)
         manifest_path.write_text(json.dumps(content, ensure_ascii=False, indent=2) + "\n")

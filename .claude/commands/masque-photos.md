@@ -24,46 +24,70 @@ stats ; si aucune place n'est disponible dans ces bornes, la collision est assum
 
 ## Flux — mode par date (défaut si les photos couvrent plusieurs dates)
 
-Trois étapes strictement séquentielles : initialiser → compléter → générer sur le
-**go explicite** de Denis (jamais de génération automatique dès que le manifest est complet).
+Cinq étapes strictement séquentielles : identifier les dates → extraire les GPX
+Garmin Connect correspondants → générer le manifest initial → inviter Denis à
+corriger/valider → générer sur son **go explicite** (jamais de génération
+automatique dès que le manifest est complet).
 
-### 1. Initialiser le manifest
-Demander le dossier d'entrée, le dossier de sortie, le nom de l'événement (pavé
-"GARMIN" remplacé) et la couleur d'accent optionnelle — ces deux derniers sont
-**globaux** (uniformes sur tout le lot). Demander aussi où se trouvent les fichiers
-GPX s'ils ne sont pas dans le dossier d'entrée (`--gpx-dir`).
+### 1. Identifier les dates des photos
+Demander le dossier d'entrée (si non fourni), le dossier de sortie, le nom de
+l'événement (pavé "GARMIN" remplacé) et la couleur d'accent optionnelle — ces deux
+derniers sont **globaux** (uniformes sur tout le lot).
 
 ```bash
-"$PY" "$SCRIPT" --in-dir "<dossier-entrée>" --init-manifest \
-  --event-name "<Nom-Événement>" [--couleur "<optionnel>"] [--gpx-dir "<dossier-gpx>"] \
-  [--manifest "<manifest.json>"]
+"$PY" "$SCRIPT" --in-dir "<dossier-entrée>" --list-dates
 ```
+Relever la date min et la date max détectées (bornes de la période à couvrir pour
+l'extraction GPX).
 
+### 2. Extraire les GPX Garmin Connect correspondants
+```bash
+"$PY" ~/Dev/masque-photos/export_garmin_gpx.py --debut <date-min> --fin <date-max> --out-dir "<dossier-entrée>"
+```
+Télécharge dans le dossier d'entrée (co-localisé avec les photos, donc directement
+repris par `--gpx-dir` à l'étape suivante) tous les fichiers GPX Garmin Connect de la
+période — idempotent (fichiers déjà présents ignorés). Authentification via jeton mis
+en cache (`~/.garminconnect`), sans prompt si la session est déjà valide.
+
+**Si la commande échoue avec un message d'authentification** (jeton absent/expiré,
+aucun terminal interactif disponible pour ressaisir les identifiants) : ne pas tenter
+de contourner — demander à Denis de lancer ce script **lui-même** une fois dans un
+terminal (`"$PY" ~/Dev/masque-photos/export_garmin_gpx.py --debut ... --fin ... --out-dir ...`),
+puis relancer cette étape une fois la session réauthentifiée.
+
+### 3. Générer le manifest initial
+```bash
+"$PY" "$SCRIPT" --in-dir "<dossier-entrée>" --init-manifest \
+  --event-name "<Nom-Événement>" [--couleur "<optionnel>"] [--manifest "<manifest.json>"]
+```
 Le script scanne les photos (regroupées par date) et les fichiers `.gpx` du dossier
-indiqué, rapproche chaque GPX de sa date (date du premier point du tracé) et écrit/
+d'entrée, rapproche chaque GPX de sa date (date du premier point du tracé) et écrit/
 complète le manifest : `event_name`/`couleur` globaux, une entrée par date détectée
-(`titre`/`lieu` vides, `stat: []`, `gpx` renseigné si un fichier a été rapproché).
-**Idempotent** : une date ou un champ déjà renseigné (y compris `event_name`/`couleur`
-si `--event-name`/`--couleur` ne sont pas refournis) n'est jamais écrasé. Un GPX dont
-la date ne correspond à aucune photo est ignoré — le signaler à Denis s'il s'attendait
-à un rapprochement.
+(`stat: []`, `gpx` renseigné si un fichier a été rapproché, `titre` **repris du nom de
+piste GPX** `<trk><name>` si disponible et pas déjà renseigné — plusieurs segments le
+même jour donnent des noms joints par ` / `). `lieu` reste toujours vide (aucune donnée
+GPX ne le fournit).
 
-Manifest par défaut : `<dossier-entrée>/manifest.json` (co-localisé avec les photos,
-sauf si Denis précise un autre chemin — utile pour rejouer/compléter le lot plus tard).
+**Idempotent** : une date ou un champ déjà renseigné (y compris `titre` auto-rempli à
+une exécution précédente, `event_name`/`couleur` si non refournis) n'est jamais
+écrasé. Un GPX dont la date ne correspond à aucune photo est ignoré — le signaler à
+Denis s'il s'attendait à un rapprochement.
 
-La sortie du script liste, pour chaque date : nombre de photos, statut
-(`rempli`/`à compléter`), et le GPX rapproché le cas échéant.
+Manifest par défaut : `<dossier-entrée>/manifest.json`. La sortie du script liste,
+pour chaque date : nombre de photos, statut (`rempli`/`à compléter` — une date reste
+`à compléter` tant que `lieu` est vide, même avec un `titre` auto-rempli), et le GPX
+rapproché le cas échéant.
 
-### 2. Compléter le manifest — uniquement les dates `à compléter`
-Pour chaque date signalée `à compléter` (dans l'ordre chronologique), demander à
-Denis : titre, lieu, et les statistiques à afficher (dénivelé +/- regroupés sur une
-ligne si les deux sont fournis, ne rien inventer). Poser ces questions **en une seule
-fois pour toutes les dates manquantes** plutôt que d'enchaîner les allers-retours,
-sauf si Denis préfère répondre au fur et à mesure.
+### 4. Inviter Denis à corriger/valider le manifest
+Présenter à Denis, **en une seule fois**, toutes les dates avec leur `titre` proposé
+(repris du GPX — à valider ou corriger, ce n'est qu'une proposition) et demander :
+confirmation ou correction du titre, le lieu (toujours à fournir), et les statistiques
+à afficher (dénivelé +/- regroupés sur une ligne si les deux sont fournis, ne rien
+inventer). Ne pas se contenter d'accepter silencieusement les titres auto-remplis —
+les montrer explicitement pour que Denis puisse les ajuster.
 
-Les dates déjà `rempli` ne sont **jamais** redemandées : leurs valeurs existantes sont
-conservées telles quelles. Si un GPX rapproché automatiquement à l'étape 1 semble
-incorrect (mauvaise date), le signaler à Denis plutôt que de le corriger silencieusement.
+Si un GPX rapproché automatiquement à l'étape 3 semble incorrect (mauvaise date), le
+signaler à Denis plutôt que de le corriger silencieusement.
 
 Écrire les réponses dans le manifest (`Edit`), format d'une entrée de date :
 ```json
@@ -75,21 +99,23 @@ incorrect (mauvaise date), le signaler à Denis plutôt que de le corriger silen
 }
 ```
 `stat` suit le format `LABEL|VALEUR|UNITÉ` (même syntaxe qu'en CLI), liste vide si
-aucune stat pour cette date.
+aucune stat pour cette date. `gpx` peut aussi être une **liste** de chemins si
+plusieurs activités distinctes existent le même jour (rapprochées automatiquement à
+l'étape 3, ne jamais fusionner manuellement deux fichiers en un seul).
 
-### 3. Demander confirmation, puis générer
+### 5. Demander confirmation, puis générer
 Une fois toutes les dates `rempli`, résumer à Denis ce qui va être généré (nombre de
 dates, nombre de photos, event/couleur) et **attendre son go explicite** avant de lancer
-le rendu — ne jamais enchaîner automatiquement après l'étape 2.
+le rendu — ne jamais enchaîner automatiquement après l'étape 4.
 
 ```bash
 "$PY" "$SCRIPT" --in-dir "<dossier-entrée>" --out-dir "<dossier-sortie>" \
   --manifest "<manifest.json>"
 ```
 `--event-name`/`--couleur` ne sont plus nécessaires ici (lus depuis le manifest) ; ne
-les refournir que si Denis veut explicitement les changer par rapport à l'étape 1. Le
+les refournir que si Denis veut explicitement les changer par rapport à l'étape 3. Le
 script échoue explicitement si une date du dossier est absente du manifest, ou si son
-titre/lieu est vide (garde-fou si l'étape 2 n'est pas terminée). Génère systématiquement
+titre/lieu est vide (garde-fou si l'étape 4 n'est pas terminée). Génère systématiquement
 les versions gauche et droite par photo.
 
 Montrer au moins une paire gauche/droite par date distincte générée, annoncer le
@@ -121,16 +147,13 @@ sur le nom de fichier `YYYYMMDD_HHMMSS`), **sans l'heure** dans le sous-titre af
 
 ## Script compagnon — export des GPX depuis Garmin Connect
 
-`~/Dev/masque-photos/export_garmin_gpx.py` télécharge en masse les fichiers GPX des
-activités Garmin Connect existant entre deux dates, en vue de leur utilisation par
-`--gpx-dir` à l'étape 1. Denis le lance lui-même dans un terminal (identifiants et
-code MFA saisis interactivement, jamais via la compétence) :
-```bash
-"$PY" ~/Dev/masque-photos/export_garmin_gpx.py --debut AAAA-MM-JJ --fin AAAA-MM-JJ --out-dir "<dossier-gpx>"
-```
-Ne pas orchestrer ce script depuis la compétence (authentification Garmin
-interactive à un service tiers) — seulement le mentionner à Denis s'il a besoin de
-récupérer des GPX avant l'étape 1.
+`~/Dev/masque-photos/export_garmin_gpx.py` (étape 2 du flux par date) télécharge en
+masse les GPX Garmin Connect entre deux dates. Orchestrable par la compétence car
+l'authentification ne bloque jamais silencieusement : session réutilisée depuis le
+jeton en cache (`~/.garminconnect`) si valide, sinon échec **immédiat et explicite**
+(pas de prompt en attente) demandant à Denis de lancer le script lui-même une fois
+dans un terminal pour (ré)authentifier. Ne jamais tenter de saisir des identifiants
+Garmin à la place de Denis.
 
 ## Variables
 
@@ -139,6 +162,8 @@ récupérer des GPX avant l'étape 1.
   maître conservé dans le vault, `10-PROJETS/2026-Masque-Photos/Réalisation/masque_photos.py`.
   Toujours éditer l'un ou l'autre chemin indifféremment (même fichier) ; ne jamais
   recréer une copie séparée, cela romprait le lien et ferait diverger les deux versions.
+- Script d'export GPX : `~/Dev/masque-photos/export_garmin_gpx.py` — même principe de
+  lien symbolique vers le fichier maître du vault.
 - Police titres/valeurs : DIN Condensed Bold (système, `/System/Library/Fonts/Supplemental/`)
 
 ## Détails communs aux deux modes
@@ -159,13 +184,21 @@ stats ; le texte du nom d'événement bascule automatiquement noir/blanc pour le
 - Le dossier de sortie est toujours distinct du dossier d'entrée — jamais d'écrasement
   des photos sources.
 - Ne pas inventer de données d'activité manquantes — omettre la ligne plutôt que
-  de fabriquer une valeur.
+  de fabriquer une valeur. Un `titre` auto-rempli depuis un nom de piste GPX n'est
+  **pas** une invention (donnée réelle du fichier) mais reste une proposition à
+  montrer explicitement à Denis pour validation/correction (étape 4), jamais à traiter
+  comme définitif sans qu'il l'ait vue.
 - Ne jamais redemander une date déjà `rempli` dans le manifest ; ne jamais écraser
   silencieusement une entrée existante (titre/lieu/stat/gpx/event_name/couleur) sans
   confirmation de Denis — `--init-manifest` est idempotent par conception, mais toute
   correction manuelle d'un champ déjà rempli doit être explicitement validée par Denis.
-- **Jamais de génération sans le go explicite de Denis** après l'étape 2 (compléter le
+- **Jamais de génération sans le go explicite de Denis** après l'étape 4 (compléter le
   manifest) — même si toutes les dates sont `rempli`.
+- **Jamais de saisie d'identifiants Garmin à la place de Denis.** L'étape 2
+  (`export_garmin_gpx.py`) échoue immédiatement et explicitement si la session en
+  cache est absente/expirée plutôt que d'attendre un prompt — dans ce cas, demander à
+  Denis de relancer le script lui-même dans un terminal.
 - Opération sans risque (pas de suppression, pas de modification de fichiers
-  existants hors manifest) — aucune validation préalable requise avant `--init-manifest`
-  ou `--list-dates` ; seule la génération finale attend le go de Denis.
+  existants hors manifest) — aucune validation préalable requise avant les étapes 1 à
+  3 (`--list-dates`, extraction GPX idempotente, `--init-manifest`) ; seule la
+  génération finale (étape 5) attend le go de Denis.

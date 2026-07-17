@@ -11,7 +11,11 @@ l'historique shell). Email/mot de passe lus depuis GARMIN_EMAIL/GARMIN_PASSWORD
 si définis, sinon demandés interactivement (mot de passe masqué). Un code MFA
 est demandé si le compte l'exige. La session est mise en cache dans
 ~/.garminconnect — les exécutions suivantes ne redemandent rien tant que le
-jeton est valide.
+jeton est valide, y compris quand le script est orchestré par la compétence
+/masque-photos (aucun prompt bloquant sans terminal interactif : échec
+immédiat et explicite si le jeton est absent/expiré et qu'aucun terminal
+n'est disponible pour ressaisir les identifiants — Denis doit alors lancer
+le script une fois lui-même dans un terminal).
 
 Usage :
     python export_garmin_gpx.py --debut 2025-11-10 --fin 2025-11-25 --out-dir ./in
@@ -33,7 +37,22 @@ except ImportError:
 TOKEN_STORE = Path.home() / ".garminconnect"
 
 
+def _require_interactive(reason: str):
+    """Refuse de bloquer sur un input() sans terminal interactif (ex. orchestré par
+    la compétence Claude Code, qui ne peut pas répondre à un prompt en cours de
+    commande) — échoue immédiatement avec un message clair plutôt que de rester
+    en attente indéfiniment."""
+    if not sys.stdin.isatty():
+        raise GarminConnectAuthenticationError(
+            f"{reason} — aucun terminal interactif disponible. Lancer ce script "
+            "manuellement dans un terminal pour (ré)authentifier une fois ; la "
+            "session est ensuite mise en cache (~/.garminconnect) et réutilisée "
+            "automatiquement, y compris quand le script est orchestré."
+        )
+
+
 def _prompt_mfa() -> str:
+    _require_interactive("Code MFA Garmin Connect requis")
     return input("Code MFA Garmin Connect : ").strip()
 
 
@@ -51,8 +70,12 @@ def login() -> Garmin:
     except GarminConnectAuthenticationError:
         pass
 
-    email = os.environ.get("GARMIN_EMAIL") or input("Email Garmin Connect : ").strip()
-    password = os.environ.get("GARMIN_PASSWORD") or getpass.getpass("Mot de passe Garmin Connect : ")
+    email = os.environ.get("GARMIN_EMAIL")
+    password = os.environ.get("GARMIN_PASSWORD")
+    if not email or not password:
+        _require_interactive("Identifiants Garmin Connect requis (GARMIN_EMAIL/GARMIN_PASSWORD absents)")
+        email = email or input("Email Garmin Connect : ").strip()
+        password = password or getpass.getpass("Mot de passe Garmin Connect : ")
     return _try_login(email, password)
 
 
@@ -77,8 +100,8 @@ def main():
 
     try:
         client = login()
-    except GarminConnectAuthenticationError:
-        print("✗ Authentification refusée (identifiants ou code MFA incorrects)", file=sys.stderr)
+    except GarminConnectAuthenticationError as e:
+        print(f"✗ Authentification refusée : {e}", file=sys.stderr)
         sys.exit(1)
 
     activities = client.get_activities_by_date(args.debut.isoformat(), args.fin.isoformat(), sortorder="asc")
