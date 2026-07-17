@@ -1,0 +1,7 @@
+.venv/
+__pycache__/
+*.pyc
+.DS_Store
+*.zip
+3-col-khumbu/
+manifest.json
