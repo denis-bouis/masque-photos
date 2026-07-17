@@ -73,21 +73,27 @@ def format_date_fr(d: date) -> str:
     return f"{d.day} {MONTHS_FR[d.month - 1]} {d.year}"
 
 
-def photo_date(photo: Path) -> date | None:
-    """Date de prise de vue (EXIF, repli sur le nom de fichier YYYYMMDD_HHMMSS)."""
+def photo_datetime(photo: Path) -> datetime | None:
+    """Date et heure de prise de vue (EXIF, repli sur le nom de fichier YYYYMMDD_HHMMSS)."""
     try:
         exif = Image.open(photo).getexif()
         exif_ifd = exif.get_ifd(0x8769)
         raw = exif_ifd.get(36867) or exif_ifd.get(36868) or exif.get(306)
         if raw:
-            return datetime.strptime(raw, "%Y:%m:%d %H:%M:%S").date()
+            return datetime.strptime(raw, "%Y:%m:%d %H:%M:%S")
     except Exception:
         pass
 
     m = re.match(r"(\d{8})_(\d{6})", photo.stem)
     if m:
-        return datetime.strptime(m.group(1) + m.group(2), "%Y%m%d%H%M%S").date()
+        return datetime.strptime(m.group(1) + m.group(2), "%Y%m%d%H%M%S")
     return None
+
+
+def photo_date(photo: Path) -> date | None:
+    """Date de prise de vue (EXIF, repli sur le nom de fichier YYYYMMDD_HHMMSS)."""
+    dt = photo_datetime(photo)
+    return dt.date() if dt else None
 
 
 WHITE = (255, 255, 255, 255)
@@ -580,6 +586,11 @@ def render_one(photo: Path, out_path: Path, event_name: str, titre: str, date_he
     out_path.parent.mkdir(parents=True, exist_ok=True)
     img.convert("RGB").save(out_path, quality=95)
 
+    dt = photo_datetime(photo)
+    if dt:
+        ts = dt.timestamp()
+        os.utime(out_path, (ts, ts))
+
 
 def main():
     parser = argparse.ArgumentParser(description="Compose un habillage type Garmin sur une ou plusieurs photos.")
@@ -765,7 +776,7 @@ def main():
 
             for photo in groups[key]:
                 for position in ("gauche", "droite"):
-                    out_path = args.out_dir / f"{photo.stem}-{position}.png"
+                    out_path = args.out_dir / f"{photo.stem}-{position}.jpg"
                     render_one(photo, out_path, event_name, titre, date_heure, lieu,
                                stats, accent, position, track=track)
                     print(f"✓ Image : {out_path}")
@@ -794,7 +805,7 @@ def main():
         if not date_heure:
             print(f"⚠ Date introuvable (EXIF et nom de fichier) pour {photo.name} — sous-titre sans date", file=sys.stderr)
         for position in ("gauche", "droite"):
-            out_path = args.out_dir / f"{photo.stem}-{position}.png"
+            out_path = args.out_dir / f"{photo.stem}-{position}.jpg"
             render_one(photo, out_path, event_name, args.titre, date_heure, args.lieu,
                        stats, accent, position, track=track)
             print(f"✓ Image : {out_path}")
