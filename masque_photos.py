@@ -386,6 +386,94 @@ def draw_stats_zone(img: Image.Image, draw: ImageDraw.ImageDraw, stats: list[tup
         y += (vb[3] - vb[1]) + inter_stat_gap
 
 
+def apply_scrim_overlay(img: Image.Image, alpha: int = 127,
+                         rgb: tuple[int, int, int] = (0, 0, 0)) -> Image.Image:
+    """Estompe toute l'image d'un voile semi-transparent uni (mode --duo, photo
+    "citation") — `alpha` sur 255 (127 ≈ 50%), `rgb` la couleur du voile (noir par défaut)."""
+    overlay = Image.new("RGBA", img.size, (*rgb, alpha))
+    return Image.alpha_composite(img, overlay)
+
+
+def wrap_text_lines(text: str, font: ImageFont.FreeTypeFont, max_width: float) -> list[str]:
+    """Découpe `text` en lignes tenant chacune dans `max_width` (retour à la ligne mot par
+    mot, glouton). Césure uniquement sur l'espace normal (" ") — une espace insécable
+    ( ) dans `text` reste dans le même "mot" et n'est donc jamais coupée en fin de
+    ligne (utile pour garder un guillemet français « » collé au mot voisin)."""
+    words = text.split(" ")
+    lines: list[str] = []
+    current = ""
+    for word in words:
+        candidate = f"{current} {word}".strip()
+        bbox = font.getbbox(candidate)
+        if not current or bbox[2] - bbox[0] <= max_width:
+            current = candidate
+        else:
+            lines.append(current)
+            current = word
+    if current:
+        lines.append(current)
+    return lines
+
+
+def fit_citation_font(text: str, max_width: float, max_height: float, start_size: int,
+                       min_size: int = 24) -> tuple[ImageFont.FreeTypeFont, list[str]]:
+    """Réduit la taille de police jusqu'à ce que `text`, réparti sur plusieurs lignes
+    (glouton, cf. `wrap_text_lines`), tienne dans `max_width` x `max_height`."""
+    size = start_size
+    while size > min_size:
+        font = load_font(FONT_BOLD, size)
+        lines = wrap_text_lines(text, font, max_width)
+        lb = font.getbbox("Hg")
+        line_h = lb[3] - lb[1]
+        line_gap = int(size * 0.25)
+        total_h = len(lines) * line_h + (len(lines) - 1) * line_gap
+        if total_h <= max_height:
+            return font, lines
+        size -= 4
+    font = load_font(FONT_BOLD, min_size)
+    return font, wrap_text_lines(text, font, max_width)
+
+
+def draw_citation_zone(img: Image.Image, draw: ImageDraw.ImageDraw, citation: str,
+                        bg_color: tuple[int, int, int, int],
+                        text_color: tuple[int, int, int, int] = WHITE):
+    """Citation entre chevrons français, centrée horizontalement et verticalement, répartie
+    sur plusieurs lignes si nécessaire, sur un pavé plein `bg_color` — même traitement que
+    le pavé événement (mode --duo, photo "citation")."""
+    w, h = img.size
+    base = min(w, h)
+    text = f"« {citation} »"
+    max_width = w * 0.8
+    max_height = h * 0.5
+    start_size = max(24, int(base * 0.055))
+    font, lines = fit_citation_font(text, max_width, max_height, start_size)
+
+    lb = font.getbbox("Hg")
+    line_h = lb[3] - lb[1]
+    line_gap = int(font.size * 0.25)
+    total_h = len(lines) * line_h + (len(lines) - 1) * line_gap
+
+    content_w = 0.0
+    for line in lines:
+        bbox = font.getbbox(line)
+        content_w = max(content_w, bbox[2] - bbox[0])
+
+    pad_x = int(base * 0.05)
+    pad_y = int(base * 0.035)
+    y0 = (h - total_h) / 2
+    box = ((w - content_w) / 2 - pad_x, y0 - pad_y,
+           (w + content_w) / 2 + pad_x, y0 + total_h + pad_y)
+    draw.rounded_rectangle(box, radius=int(base * 0.015), fill=bg_color)
+
+    y = y0
+    for line in lines:
+        bbox = font.getbbox(line)
+        line_w = bbox[2] - bbox[0]
+        x = (w - line_w) / 2
+        draw.text((x, y), line, font=font, fill=text_color)
+        y += line_h + line_gap
+
+
 def load_gpx_track(path: Path) -> list[tuple[float, float]]:
     """Points (lat, lon) d'un fichier GPX, dans l'ordre du tracé."""
     tree = ET.parse(path)
@@ -659,16 +747,39 @@ def render_stats(photo: Path, out_path: Path, titre: str, stats: list[tuple[str,
     _save_image(img, out_path, photo)
 
 
+def render_citation(photo: Path, out_path: Path, citation: str, accent: tuple[int, int, int, int],
+                     voile: bool = False):
+    """Mode --duo, photo optionnelle "citation" : citation entre chevrons, centrée, répartie
+    sur plusieurs lignes si nécessaire, sur un pavé plein de la couleur d'accent (même
+    traitement que le pavé événement), texte blanc. `voile` (option par date, clé
+    'citation_voile' du manifest) applique un voile blanc à 50% sur toute la photo avant le
+    pavé — utile si une photo trop chargée/claire nuit au contraste, mais plus nécessaire à
+    la lisibilité du texte lui-même (le pavé plein s'en charge)."""
+    citation = sanitize_text(citation, FONT_BOLD)
+
+    img = _prepare_image(photo)
+    if voile:
+        img = apply_scrim_overlay(img, alpha=127, rgb=(255, 255, 255))
+
+    draw = ImageDraw.Draw(img)
+    draw_citation_zone(img, draw, citation, bg_color=accent, text_color=WHITE)
+
+    _save_image(img, out_path, photo)
+
+
 def photo_role(photo: Path) -> str | None:
     """Rôle d'une photo en mode --duo, d'après son nom de fichier : suffixe '-scene'
-    (événement/date/lieu/tracé) ou '-stats' (titre/stats). None si aucun des deux suffixes
-    n'est présent — la date reste extraite normalement par `photo_date` (regex ancrée en
-    début de nom, insensible au suffixe de rôle)."""
+    (événement/date/lieu/tracé), '-stats' (titre/stats) ou '-citation' (citation seule,
+    optionnelle). None si aucun de ces suffixes n'est présent — la date reste extraite
+    normalement par `photo_date` (regex ancrée en début de nom, insensible au suffixe de
+    rôle)."""
     stem = photo.stem
     if stem.endswith("-scene"):
         return "scene"
     if stem.endswith("-stats"):
         return "stats"
+    if stem.endswith("-citation"):
+        return "citation"
     return None
 
 
@@ -724,11 +835,13 @@ def main():
                               "Déduit de --dossier (<dossier>/gpx) si omis ; à défaut, --in-dir.")
     parser.add_argument("--duo", action="store_true",
                          help="Mode --manifest uniquement. Au lieu d'incruster titre+lieu+stats+tracé sur "
-                              "chaque photo (versions gauche/droite), attend exactement 2 photos déjà au "
+                              "chaque photo (versions gauche/droite), attend au moins 2 photos déjà au "
                               "ratio 4:5 par date, nommées '<...>-scene.jpg' et '<...>-stats.jpg' : la photo "
                               "'scene' reçoit nom d'événement, date, lieu et tracé GPS ; la photo 'stats' "
-                              "reçoit titre et statistiques. Une seule image générée par photo (pas de "
-                              "variante gauche/droite, les 2 photos étant déjà cadrées par Denis).")
+                              "reçoit titre et statistiques. Une 3ᵉ photo optionnelle '<...>-citation.jpg' "
+                              "reçoit un voile noir semi-transparent et la citation (clé 'citation' du "
+                              "manifest pour cette date) entre guillemets, centrée. Une seule image générée "
+                              "(pas de variante gauche/droite, les photos étant déjà cadrées par Denis).")
 
     args = parser.parse_args()
 
@@ -862,11 +975,19 @@ def main():
                     track.append(load_gpx_track(gpx_path))
 
             if args.duo:
-                roles = {photo_role(p): p for p in groups[key]}
-                if set(roles) != {"scene", "stats"} or len(groups[key]) != 2:
+                roles: dict[str, Path] = {}
+                unrecognized = []
+                for p in groups[key]:
+                    r = photo_role(p)
+                    if r is None:
+                        unrecognized.append(p)
+                    else:
+                        roles[r] = p
+                if unrecognized or "scene" not in roles or "stats" not in roles:
                     noms = ", ".join(p.name for p in groups[key])
-                    print(f"✗ Mode --duo : {key} doit avoir exactement 2 photos nommées "
-                          f"'*-scene.jpg' et '*-stats.jpg' (trouvé : {noms})", file=sys.stderr)
+                    print(f"✗ Mode --duo : {key} doit avoir au moins 2 photos nommées "
+                          f"'*-scene.jpg' et '*-stats.jpg' (une '*-citation.jpg' optionnelle "
+                          f"est aussi acceptée) — trouvé : {noms}", file=sys.stderr)
                     sys.exit(1)
                 out_scene = args.out_dir / f"{roles['scene'].stem}.jpg"
                 render_scene(roles["scene"], out_scene, event_name, date_heure, lieu, accent, track=track)
@@ -874,6 +995,16 @@ def main():
                 out_stats = args.out_dir / f"{roles['stats'].stem}.jpg"
                 render_stats(roles["stats"], out_stats, titre, stats, accent, position="gauche")
                 print(f"✓ Image : {out_stats}")
+                if "citation" in roles:
+                    citation = entry.get("citation")
+                    if not citation:
+                        print(f"✗ Photo citation trouvée pour {key} mais aucun champ 'citation' "
+                              f"dans le manifest", file=sys.stderr)
+                        sys.exit(1)
+                    out_citation = args.out_dir / f"{roles['citation'].stem}.jpg"
+                    render_citation(roles["citation"], out_citation, citation, accent,
+                                     voile=bool(entry.get("citation_voile", False)))
+                    print(f"✓ Image : {out_citation}")
                 continue
 
             for photo in groups[key]:

@@ -100,13 +100,17 @@ signaler à Denis plutôt que de le corriger silencieusement.
   "titre": "J1 - ...",
   "lieu": "...",
   "stat": ["DURÉE|5h30|", "DISTANCE|18|km"],
-  "gpx": "gpx/activity_XXXX.gpx"
+  "gpx": "gpx/activity_XXXX.gpx",
+  "citation": "Une phrase forte extraite de la légende, optionnelle.",
+  "citation_voile": false
 }
 ```
 `stat` suit le format `LABEL|VALEUR|UNITÉ` (même syntaxe qu'en CLI), liste vide si
 aucune stat pour cette date. `gpx` peut aussi être une **liste** de chemins si
 plusieurs activités distinctes existent le même jour (rapprochées automatiquement à
-l'étape 3, ne jamais fusionner manuellement deux fichiers en un seul).
+l'étape 3, ne jamais fusionner manuellement deux fichiers en un seul). `citation` et
+`citation_voile` ne sont utiles qu'en mode `--duo` avec une photo `-citation` pour
+cette date (cf. plus bas) — omis sinon.
 
 ### 5. Demander confirmation, puis générer
 Une fois toutes les dates `rempli`, résumer à Denis ce qui va être généré (nombre de
@@ -160,14 +164,26 @@ photos déjà cadrées par date au lieu d'une seule :
 "$PY" "$SCRIPT" --dossier "<dossier-événement>" --duo
 ```
 
-Attend exactement **2 photos par date** dans `in/`, déjà au ratio souhaité, nommées
+Attend au moins **2 photos par date** dans `in/`, déjà au ratio souhaité, nommées
 `<YYYYMMDD_HHMMSS>-scene.jpg` et `<YYYYMMDD_HHMMSS>-stats.jpg` :
 - **scene** : nom d'événement, date, lieu et tracé GPS (pas de titre, pas de stats)
 - **stats** : titre et statistiques (pas de nom d'événement, pas de date/lieu, pas de tracé)
 
-Une seule image générée par photo (pas de variante gauche/droite — les 2 photos sont déjà
+Une **3ᵉ photo optionnelle** `<YYYYMMDD_HHMMSS>-citation.jpg` génère une slide citation :
+citation entre chevrons français (« »), centrée horizontalement et verticalement, répartie
+sur plusieurs lignes si nécessaire (police réduite automatiquement pour tenir dans le
+cadre), sur un pavé plein de la couleur d'accent — même traitement visuel que le pavé
+événement — texte blanc. Le texte vient de la clé `citation` du manifest pour cette date
+(string, absente = pas de slide citation pour ce jour) — échoue explicitement si une photo
+`-citation` existe sans `citation` dans le manifest, plutôt que de publier une slide vide.
+Voile blanc semi-transparent sur toute la photo en option (clé `citation_voile: true`,
+défaut `false`) — plus nécessaire à la lisibilité du texte (le pavé plein s'en charge
+seul) mais peut aider si une photo est trop chargée/claire pour contraster avec le fond.
+
+Une seule image générée par photo (pas de variante gauche/droite — les photos sont déjà
 cadrées par Denis, la logique gauche/droite d'évitement de visage n'a plus lieu d'être).
-Échoue explicitement si une date n'a pas exactement ces 2 photos avec ces suffixes.
+Échoue explicitement si une date n'a pas au moins les photos `-scene`/`-stats` avec ces
+suffixes.
 
 ## Recadrage automatique au ratio Instagram
 
