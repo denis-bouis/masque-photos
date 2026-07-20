@@ -178,6 +178,28 @@ def add_vertical_vignette(base: Image.Image, top_h_frac: float, bottom_h_frac: f
     return Image.alpha_composite(base, overlay)
 
 
+INSTAGRAM_MIN_RATIO, INSTAGRAM_MAX_RATIO = 0.5625, 1.91  # portrait 9:16 (reels/stories), paysage 1.91:1
+
+
+def clamp_aspect_for_instagram(img: Image.Image) -> Image.Image:
+    """Recadre au ratio maximum accepté par Instagram (portrait 9:16 — la limite verticale la
+    plus permissive sur toute la plateforme, reels/stories compris ; paysage max 1.91:1),
+    centré. Sans ce recadrage, une photo hors de ces bornes serait recadrée par Instagram
+    lui-même à la publication — de façon imprévisible, risquant de couper le bandeau titre ou
+    le bloc stats incrustés près des bords de l'image."""
+    w, h = img.size
+    ratio = w / h
+    if ratio < INSTAGRAM_MIN_RATIO:
+        new_h = round(w / INSTAGRAM_MIN_RATIO)
+        top = (h - new_h) // 2
+        return img.crop((0, top, w, top + new_h))
+    if ratio > INSTAGRAM_MAX_RATIO:
+        new_w = round(h * INSTAGRAM_MAX_RATIO)
+        left = (w - new_w) // 2
+        return img.crop((left, 0, left + new_w, h))
+    return img
+
+
 def draw_scrim(img: Image.Image, box: tuple[float, float, float, float], radius: int, alpha: int = 130):
     """Voile sombre arrondi derrière un bloc de texte, pour garantir la lisibilité."""
     w, h = img.size
@@ -216,6 +238,49 @@ def draw_title_zone(img: Image.Image, draw: ImageDraw.ImageDraw, titre: str, dat
 
     draw.text((margin_x, top_y), titre, font=title_font, fill=color)
     draw.text((margin_x, sub_y), sub_text, font=sub_font, fill=dim(color))
+
+
+def draw_title_only_zone(img: Image.Image, draw: ImageDraw.ImageDraw, titre: str,
+                          color: tuple[int, int, int, int] = WHITE):
+    """Variante de draw_title_zone sans le sous-titre date/lieu (mode --duo, photo "stats")."""
+    w, h = img.size
+    base = min(w, h)
+    margin_x = int(base * 0.045)
+    top_y = int(h * 0.035)
+
+    title_size = max(18, int(base * 0.052))
+    title_font = fit_font(FONT_BOLD, titre, int(w * 0.75), title_size)
+    tbbox = title_font.getbbox(titre)
+    title_w = tbbox[2] - tbbox[0]
+    title_h = tbbox[3] - tbbox[1]
+
+    pad_x = int(base * 0.035)
+    pad_y = int(base * 0.025)
+    draw_scrim(img, (margin_x - pad_x, top_y - pad_y, margin_x + title_w + pad_x, top_y + title_h + pad_y), pad_x)
+
+    draw.text((margin_x, top_y), titre, font=title_font, fill=color)
+
+
+def draw_meta_zone(img: Image.Image, draw: ImageDraw.ImageDraw, date_heure: str, lieu: str,
+                    color: tuple[int, int, int, int] = WHITE):
+    """Variante de draw_title_zone sans le titre — juste la ligne date/lieu (mode --duo, photo "scène")."""
+    w, h = img.size
+    base = min(w, h)
+    margin_x = int(base * 0.045)
+    top_y = int(h * 0.035)
+
+    sub_size = max(12, int(base * 0.052 * 0.45))
+    sub_font = load_font(FONT_REGULAR, sub_size)
+    sub_text = f"{date_heure} @ {lieu}" if date_heure else lieu
+    sbbox = sub_font.getbbox(sub_text)
+    sub_w = sbbox[2] - sbbox[0]
+    sub_h = sbbox[3] - sbbox[1]
+
+    pad_x = int(base * 0.035)
+    pad_y = int(base * 0.025)
+    draw_scrim(img, (margin_x - pad_x, top_y - pad_y, margin_x + sub_w + pad_x, top_y + sub_h + pad_y), pad_x)
+
+    draw.text((margin_x, top_y), sub_text, font=sub_font, fill=color)
 
 
 def draw_logo_zone(img: Image.Image, event_name: str, box_color: tuple[int, int, int, int] = WHITE):
@@ -411,55 +476,6 @@ def project_tracks(segments: list[list[tuple[float, float]]], box_w: float, box_
     return out
 
 
-def detect_face_bands(img: Image.Image) -> list[tuple[float, float]]:
-    """Bandes verticales (fraction de hauteur, haut/bas) occupées par des visages
-    détectés dans `img`, pour éviter que le tracé GPS ne les traverse. Retourne
-    une liste vide si opencv n'est pas installé (dégradation silencieuse vers la
-    position par défaut du tracé) ou si aucun visage n'est détecté."""
-    try:
-        import cv2
-        import numpy as np
-    except ImportError:
-        return []
-    w, h = img.size
-    gray = np.array(img.convert("L"))
-    cascade = cv2.CascadeClassifier(cv2.data.haarcascades + "haarcascade_frontalface_default.xml")
-    min_side = max(20, int(w * 0.03))
-    faces = cascade.detectMultiScale(gray, scaleFactor=1.1, minNeighbors=5, minSize=(min_side, min_side))
-    return [(y / h, (y + fh) / h) for (_, y, _, fh) in faces]
-
-
-def choose_track_band_top(face_bands: list[tuple[float, float]], band_h: float, top_bound: float,
-                           bottom_bound: float, default_top: float, margin: float = 0.02) -> float:
-    """Position verticale (fraction de hauteur) de la bande du tracé GPS : la
-    position par défaut si elle ne croise aucun visage détecté, sinon la bande
-    est déplacée au-dessus ou en dessous des visages selon la place disponible
-    dans [top_bound, bottom_bound] (en dessous privilégié à égalité de place)."""
-    if not face_bands:
-        return default_top
-
-    face_top = min(b[0] for b in face_bands) - margin
-    face_bottom = max(b[1] for b in face_bands) + margin
-    default_bottom = default_top + band_h
-
-    if default_bottom <= face_top or default_top >= face_bottom:
-        return default_top  # pas de collision
-
-    above_top = face_top - band_h
-    above_ok = above_top >= top_bound
-
-    below_top = face_bottom
-    below_ok = below_top + band_h <= bottom_bound
-
-    if below_ok and above_ok:
-        return below_top if (below_top - default_top) <= (default_top - above_top) else above_top
-    if below_ok:
-        return below_top
-    if above_ok:
-        return above_top
-    return default_top  # aucune place disponible dans les bornes, collision assumée
-
-
 def _draw_track_segment(ldraw: ImageDraw.ImageDraw, pts: list[tuple[float, float]],
                          color: tuple[int, int, int, int], line_w: int):
     """Dessine une polyligne + point de départ + flèche d'arrivée pour un seul segment."""
@@ -486,26 +502,23 @@ def _draw_track_segment(ldraw: ImageDraw.ImageDraw, pts: list[tuple[float, float
 
 
 def draw_gps_track_zone(img: Image.Image, segments: list[list[tuple[float, float]]],
-                         color: tuple[int, int, int, int] = WHITE):
+                         color: tuple[int, int, int, int] = WHITE, position: str = "gauche"):
     """Dessine un ou plusieurs tracés GPS stylisés (ex. deux activités distinctes le
-    même jour) : ligne + point de départ + flèche d'arrivée par segment, sur une
-    bande horizontale de la photo, à une échelle commune. Les tracés sont mis à
-    l'échelle pour tenir dans leur boîte, pas projetés sur le terrain réel de la
-    photo (aucune donnée de pose de caméra disponible pour un ancrage fidèle). La
-    bande est repositionnée verticalement (au-dessus ou en dessous) si elle
-    croiserait un visage détecté, dans la limite de la zone [top_bound, bottom_bound]
-    laissée libre par le bandeau titre et le bloc stats."""
+    même jour) : ligne + point de départ + flèche d'arrivée par segment, à une échelle
+    commune, dans un bloc en bas de l'image — du côté **opposé** au bloc stats (bas
+    gauche si `position` "droite", bas droite si "gauche"), pour que les 4 coins de
+    l'image portent chacun un bloc distinct (titre, logo, stats, tracé). Les tracés
+    sont mis à l'échelle pour tenir dans leur boîte, pas projetés sur le terrain réel
+    de la photo (aucune donnée de pose de caméra disponible pour un ancrage fidèle)."""
     w, h = img.size
     base = min(w, h)
-    band_h_frac, margin_x_frac = 0.22, 0.08
-    top_bound, bottom_bound, default_top = 0.16, 0.62, 0.28
+    margin_x = int(base * 0.045)
+    margin_bottom = int(h * 0.045)
+    box_w = int(w * 0.42)
+    box_h = int(h * 0.18)
 
-    face_bands = detect_face_bands(img)
-    top_frac = choose_track_band_top(face_bands, band_h_frac, top_bound, bottom_bound, default_top)
-
-    box_w = w * (1 - 2 * margin_x_frac)
-    box_h = h * band_h_frac
-    origin_x, origin_y = w * margin_x_frac, h * top_frac
+    origin_x = margin_x if position == "droite" else w - margin_x - box_w
+    origin_y = h - margin_bottom - box_h
 
     rel_segments = project_tracks(segments, box_w, box_h)
 
@@ -552,6 +565,31 @@ def group_by_date(photos: list[Path]) -> dict[str, list[Path]]:
     return groups
 
 
+def _prepare_image(photo: Path) -> Image.Image:
+    """Ouvre `photo`, corrige l'orientation EXIF, convertit en RGBA et recadre au ratio
+    Instagram — étapes communes à tous les modes de rendu."""
+    img = Image.open(photo)
+    try:
+        from PIL import ImageOps
+        img = ImageOps.exif_transpose(img)
+    except Exception:
+        pass
+    img = img.convert("RGBA")
+    return clamp_aspect_for_instagram(img)
+
+
+def _save_image(img: Image.Image, out_path: Path, photo: Path):
+    """Sauvegarde `img` en JPEG dans `out_path` et reprend la date EXIF de `photo` sur le
+    fichier généré — étapes communes à tous les modes de rendu."""
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    img.convert("RGB").save(out_path, quality=95)
+
+    dt = photo_datetime(photo)
+    if dt:
+        ts = dt.timestamp()
+        os.utime(out_path, (ts, ts))
+
+
 def render_one(photo: Path, out_path: Path, event_name: str, titre: str, date_heure: str, lieu: str,
                stats: list[tuple[str, str, str]], accent: tuple[int, int, int, int], position: str,
                track: list[list[tuple[float, float]]] | None = None):
@@ -562,18 +600,11 @@ def render_one(photo: Path, out_path: Path, event_name: str, titre: str, date_he
     stats = [(sanitize_text(l, FONT_REGULAR), sanitize_text(v, FONT_BOLD), sanitize_text(u, FONT_BOLD))
              for l, v, u in stats]
 
-    img = Image.open(photo)
-    try:
-        from PIL import ImageOps
-        img = ImageOps.exif_transpose(img)
-    except Exception:
-        pass
-    img = img.convert("RGBA")
-
+    img = _prepare_image(photo)
     img = add_vertical_vignette(img, top_h_frac=0.22, bottom_h_frac=0.32)
 
     if track:
-        draw_gps_track_zone(img, track, color=accent)
+        draw_gps_track_zone(img, track, color=accent, position=position)
 
     draw = ImageDraw.Draw(img)
 
@@ -583,13 +614,62 @@ def render_one(photo: Path, out_path: Path, event_name: str, titre: str, date_he
     if stats:
         draw_stats_zone(img, draw, stats, color=accent, position=position)
 
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    img.convert("RGB").save(out_path, quality=95)
+    _save_image(img, out_path, photo)
 
-    dt = photo_datetime(photo)
-    if dt:
-        ts = dt.timestamp()
-        os.utime(out_path, (ts, ts))
+
+def render_scene(photo: Path, out_path: Path, event_name: str, date_heure: str, lieu: str,
+                  accent: tuple[int, int, int, int], track: list[list[tuple[float, float]]] | None = None,
+                  position: str = "droite"):
+    """Mode --duo, 1ʳᵉ photo : nom d'événement, date, lieu et tracé GPS — sans titre ni stats.
+    Pas de bloc stats sur cette photo (il est sur la photo "stats") : `position` ne fait que
+    choisir le coin bas du tracé (bas gauche par défaut), sans contrainte d'opposition."""
+    event_name = sanitize_text(event_name, FONT_BOLD)
+    lieu = sanitize_text(lieu, FONT_REGULAR)
+    date_heure = sanitize_text(date_heure, FONT_REGULAR)
+
+    img = _prepare_image(photo)
+    img = add_vertical_vignette(img, top_h_frac=0.22, bottom_h_frac=0.32)
+
+    if track:
+        draw_gps_track_zone(img, track, color=accent, position=position)
+
+    draw = ImageDraw.Draw(img)
+    draw_meta_zone(img, draw, date_heure, lieu, color=accent)
+    draw_logo_zone(img, event_name, box_color=accent)
+
+    _save_image(img, out_path, photo)
+
+
+def render_stats(photo: Path, out_path: Path, titre: str, stats: list[tuple[str, str, str]],
+                  accent: tuple[int, int, int, int], position: str):
+    """Mode --duo, 2ᵉ photo : titre et statistiques — sans nom d'événement, date, lieu ni tracé."""
+    titre = sanitize_text(titre, FONT_BOLD)
+    stats = [(sanitize_text(l, FONT_REGULAR), sanitize_text(v, FONT_BOLD), sanitize_text(u, FONT_BOLD))
+             for l, v, u in stats]
+
+    img = _prepare_image(photo)
+    img = add_vertical_vignette(img, top_h_frac=0.22, bottom_h_frac=0.32)
+
+    draw = ImageDraw.Draw(img)
+    draw_title_only_zone(img, draw, titre, color=accent)
+
+    if stats:
+        draw_stats_zone(img, draw, stats, color=accent, position=position)
+
+    _save_image(img, out_path, photo)
+
+
+def photo_role(photo: Path) -> str | None:
+    """Rôle d'une photo en mode --duo, d'après son nom de fichier : suffixe '-scene'
+    (événement/date/lieu/tracé) ou '-stats' (titre/stats). None si aucun des deux suffixes
+    n'est présent — la date reste extraite normalement par `photo_date` (regex ancrée en
+    début de nom, insensible au suffixe de rôle)."""
+    stem = photo.stem
+    if stem.endswith("-scene"):
+        return "scene"
+    if stem.endswith("-stats"):
+        return "stats"
+    return None
 
 
 def main():
@@ -642,6 +722,13 @@ def main():
     parser.add_argument("--gpx-dir", type=Path, default=None,
                          help="Dossier des fichiers .gpx à rapprocher des dates (mode --init-manifest). "
                               "Déduit de --dossier (<dossier>/gpx) si omis ; à défaut, --in-dir.")
+    parser.add_argument("--duo", action="store_true",
+                         help="Mode --manifest uniquement. Au lieu d'incruster titre+lieu+stats+tracé sur "
+                              "chaque photo (versions gauche/droite), attend exactement 2 photos déjà au "
+                              "ratio 4:5 par date, nommées '<...>-scene.jpg' et '<...>-stats.jpg' : la photo "
+                              "'scene' reçoit nom d'événement, date, lieu et tracé GPS ; la photo 'stats' "
+                              "reçoit titre et statistiques. Une seule image générée par photo (pas de "
+                              "variante gauche/droite, les 2 photos étant déjà cadrées par Denis).")
 
     args = parser.parse_args()
 
@@ -773,6 +860,21 @@ def main():
                         print(f"✗ GPX introuvable pour {key} : {gpx_path}", file=sys.stderr)
                         sys.exit(1)
                     track.append(load_gpx_track(gpx_path))
+
+            if args.duo:
+                roles = {photo_role(p): p for p in groups[key]}
+                if set(roles) != {"scene", "stats"} or len(groups[key]) != 2:
+                    noms = ", ".join(p.name for p in groups[key])
+                    print(f"✗ Mode --duo : {key} doit avoir exactement 2 photos nommées "
+                          f"'*-scene.jpg' et '*-stats.jpg' (trouvé : {noms})", file=sys.stderr)
+                    sys.exit(1)
+                out_scene = args.out_dir / f"{roles['scene'].stem}.jpg"
+                render_scene(roles["scene"], out_scene, event_name, date_heure, lieu, accent, track=track)
+                print(f"✓ Image : {out_scene}")
+                out_stats = args.out_dir / f"{roles['stats'].stem}.jpg"
+                render_stats(roles["stats"], out_stats, titre, stats, accent, position="gauche")
+                print(f"✓ Image : {out_stats}")
+                continue
 
             for photo in groups[key]:
                 for position in ("gauche", "droite"):

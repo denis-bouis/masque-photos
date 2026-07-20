@@ -149,6 +149,40 @@ un habillage identique pour tout le lot, sauter le manifest :
 `--date-heure` omis ⇒ date dérivée automatiquement de l'EXIF de chaque photo (repli
 sur le nom de fichier `YYYYMMDD_HHMMSS`), **sans l'heure** dans le sous-titre affiché.
 
+## Mode --duo (mode par date uniquement)
+
+Recadrage automatique (`clamp_aspect_for_instagram`) au ratio maximum accepté par Instagram
+(portrait 9:16, paysage 1.91:1) — voir section suivante. Pour un contrôle total du cadrage
+(ex. respecter le 4:5 strict du feed sans aucune perte), Denis peut fournir directement 2
+photos déjà cadrées par date au lieu d'une seule :
+
+```bash
+"$PY" "$SCRIPT" --dossier "<dossier-événement>" --duo
+```
+
+Attend exactement **2 photos par date** dans `in/`, déjà au ratio souhaité, nommées
+`<YYYYMMDD_HHMMSS>-scene.jpg` et `<YYYYMMDD_HHMMSS>-stats.jpg` :
+- **scene** : nom d'événement, date, lieu et tracé GPS (pas de titre, pas de stats)
+- **stats** : titre et statistiques (pas de nom d'événement, pas de date/lieu, pas de tracé)
+
+Une seule image générée par photo (pas de variante gauche/droite — les 2 photos sont déjà
+cadrées par Denis, la logique gauche/droite d'évitement de visage n'a plus lieu d'être).
+Échoue explicitement si une date n'a pas exactement ces 2 photos avec ces suffixes.
+
+## Recadrage automatique au ratio Instagram
+
+Toutes les photos sont recadrées (centré) à `clamp_aspect_for_instagram` avant incrustation
+du texte : portrait max 9:16, paysage max 1.91:1 — au-delà, Instagram recadrerait lui-même à
+la publication, de façon imprévisible, risquant de couper le bandeau titre ou le bloc stats
+près des bords. Le recadrage a lieu **avant** l'incrustation, donc titre/stats se
+repositionnent automatiquement dans les nouvelles dimensions. Sans effet sur une photo déjà
+dans ces bornes (mode --duo avec photos pré-cadrées en 4:5, par exemple).
+
+⚠️ Recadrer signifie perdre une partie de la photo (ex. ~17% de hauteur pour une photo très
+verticale ramenée à 9:16). Les vignettes de la grille de profil Instagram restent, elles,
+recadrées en carré (1:1) par Instagram lui-même — sans solution native pour l'éviter sur un
+post photo/carrousel (contrairement aux reels, qui acceptent une image de couverture séparée).
+
 ## Script compagnon — export des GPX depuis Garmin Connect
 
 `~/Dev/masque-photos/export_garmin_gpx.py` (étape 2 du flux par date) télécharge en
