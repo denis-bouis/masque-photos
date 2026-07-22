@@ -28,6 +28,7 @@ import json
 import math
 import os
 import re
+import shutil
 import sys
 import xml.etree.ElementTree as ET
 from datetime import date, datetime
@@ -37,6 +38,8 @@ from PIL import Image, ImageColor, ImageDraw, ImageFont
 
 FONT_BOLD = "/System/Library/Fonts/Supplemental/DIN Condensed Bold.ttf"
 FONT_REGULAR = "/System/Library/Fonts/Supplemental/DIN Alternate Bold.ttf"
+FONT_SIGNATURE_PATH = "/System/Library/Fonts/Supplemental/SnellRoundhand.ttc"
+FONT_SIGNATURE_INDEX = 1  # 0=Regular, 1=Bold, 2=Black — Bold reste lisible sur photo sans bloc derrière
 
 
 def _font_cmap(path: str) -> set[int]:
@@ -47,7 +50,7 @@ def _font_cmap(path: str) -> set[int]:
         return set()
 
 
-_CMAPS = {path: _font_cmap(path) for path in (FONT_BOLD, FONT_REGULAR)}
+_CMAPS = {path: _font_cmap(path) for path in (FONT_BOLD, FONT_REGULAR, FONT_SIGNATURE_PATH)}
 
 
 def sanitize_text(text: str, *fonts: str, fallback: str = "-") -> str:
@@ -117,21 +120,22 @@ def contrasting_text_color(bg: tuple[int, int, int, int]) -> tuple[int, int, int
     return BLACK if luminance > 0.55 else WHITE
 
 
-def load_font(path: str, size: int) -> ImageFont.FreeTypeFont:
-    return ImageFont.truetype(path, size)
+def load_font(path: str, size: int, index: int = 0) -> ImageFont.FreeTypeFont:
+    return ImageFont.truetype(path, size, index=index)
 
 
-def fit_font(path: str, text: str, max_width: int, start_size: int, min_size: int = 8) -> ImageFont.FreeTypeFont:
+def fit_font(path: str, text: str, max_width: int, start_size: int, min_size: int = 8,
+             index: int = 0) -> ImageFont.FreeTypeFont:
     """Réduit la taille de police jusqu'à ce que `text` tienne dans `max_width`."""
     size = start_size
-    font = load_font(path, size)
+    font = load_font(path, size, index=index)
     while size > min_size:
         bbox = font.getbbox(text)
         width = bbox[2] - bbox[0]
         if width <= max_width:
             break
         size -= 2
-        font = load_font(path, size)
+        font = load_font(path, size, index=index)
     return font
 
 
@@ -242,7 +246,7 @@ def draw_title_zone(img: Image.Image, draw: ImageDraw.ImageDraw, titre: str, dat
 
 def draw_title_only_zone(img: Image.Image, draw: ImageDraw.ImageDraw, titre: str,
                           color: tuple[int, int, int, int] = WHITE):
-    """Variante de draw_title_zone sans le sous-titre date/lieu (mode --duo, photo "stats")."""
+    """Variante de draw_title_zone sans le sous-titre date/lieu (mode adaptatif, rôle -titre)."""
     w, h = img.size
     base = min(w, h)
     margin_x = int(base * 0.045)
@@ -261,31 +265,10 @@ def draw_title_only_zone(img: Image.Image, draw: ImageDraw.ImageDraw, titre: str
     draw.text((margin_x, top_y), titre, font=title_font, fill=color)
 
 
-def draw_meta_zone(img: Image.Image, draw: ImageDraw.ImageDraw, date_heure: str, lieu: str,
-                    color: tuple[int, int, int, int] = WHITE):
-    """Variante de draw_title_zone sans le titre — juste la ligne date/lieu (mode --duo, photo "scène")."""
-    w, h = img.size
-    base = min(w, h)
-    margin_x = int(base * 0.045)
-    top_y = int(h * 0.035)
-
-    sub_size = max(12, int(base * 0.052 * 0.45))
-    sub_font = load_font(FONT_REGULAR, sub_size)
-    sub_text = f"{date_heure} @ {lieu}" if date_heure else lieu
-    sbbox = sub_font.getbbox(sub_text)
-    sub_w = sbbox[2] - sbbox[0]
-    sub_h = sbbox[3] - sbbox[1]
-
-    pad_x = int(base * 0.035)
-    pad_y = int(base * 0.025)
-    draw_scrim(img, (margin_x - pad_x, top_y - pad_y, margin_x + sub_w + pad_x, top_y + sub_h + pad_y), pad_x)
-
-    draw.text((margin_x, top_y), sub_text, font=sub_font, fill=color)
-
-
 def draw_logo_zone(img: Image.Image, event_name: str, box_color: tuple[int, int, int, int] = WHITE):
     w, h = img.size
     base = min(w, h)
+    margin_x = int(base * 0.045)  # même marge que le bloc stats, pour un alignement droit commun
     box_h = int(h * 0.20)
     box_w = int(box_h * 0.24)  # largeur proportionnelle à la hauteur du pavé (constante quelle que soit l'orientation)
     inner_pad = int(box_h * 0.06)
@@ -310,7 +293,7 @@ def draw_logo_zone(img: Image.Image, event_name: str, box_color: tuple[int, int,
     box.alpha_composite(rotated, (bx, by))
 
     top_y = int(h * 0.035)  # aligné sur le point haut du titre (cf. draw_title_zone)
-    img.alpha_composite(box, (w - box_w, top_y))
+    img.alpha_composite(box, (w - margin_x - box_w, top_y))
 
 
 def draw_stats_zone(img: Image.Image, draw: ImageDraw.ImageDraw, stats: list[tuple[str, str, str]],
@@ -388,8 +371,8 @@ def draw_stats_zone(img: Image.Image, draw: ImageDraw.ImageDraw, stats: list[tup
 
 def apply_scrim_overlay(img: Image.Image, alpha: int = 127,
                          rgb: tuple[int, int, int] = (0, 0, 0)) -> Image.Image:
-    """Estompe toute l'image d'un voile semi-transparent uni (mode --duo, photo
-    "citation") — `alpha` sur 255 (127 ≈ 50%), `rgb` la couleur du voile (noir par défaut)."""
+    """Estompe toute l'image d'un voile semi-transparent uni (mode adaptatif, rôle -citation) —
+    `alpha` sur 255 (127 ≈ 50%), `rgb` la couleur du voile (noir par défaut)."""
     overlay = Image.new("RGBA", img.size, (*rgb, alpha))
     return Image.alpha_composite(img, overlay)
 
@@ -418,10 +401,11 @@ def wrap_text_lines(text: str, font: ImageFont.FreeTypeFont, max_width: float) -
 def fit_citation_font(text: str, max_width: float, max_height: float, start_size: int,
                        min_size: int = 24) -> tuple[ImageFont.FreeTypeFont, list[str]]:
     """Réduit la taille de police jusqu'à ce que `text`, réparti sur plusieurs lignes
-    (glouton, cf. `wrap_text_lines`), tienne dans `max_width` x `max_height`."""
+    (glouton, cf. `wrap_text_lines`), tienne dans `max_width` x `max_height`. Police cursive
+    (Snell Roundhand, même style que la signature -- cf. draw_signature_zone)."""
     size = start_size
     while size > min_size:
-        font = load_font(FONT_BOLD, size)
+        font = load_font(FONT_SIGNATURE_PATH, size, index=FONT_SIGNATURE_INDEX)
         lines = wrap_text_lines(text, font, max_width)
         lb = font.getbbox("Hg")
         line_h = lb[3] - lb[1]
@@ -430,19 +414,19 @@ def fit_citation_font(text: str, max_width: float, max_height: float, start_size
         if total_h <= max_height:
             return font, lines
         size -= 4
-    font = load_font(FONT_BOLD, min_size)
+    font = load_font(FONT_SIGNATURE_PATH, min_size, index=FONT_SIGNATURE_INDEX)
     return font, wrap_text_lines(text, font, max_width)
 
 
 def draw_citation_zone(img: Image.Image, draw: ImageDraw.ImageDraw, citation: str,
-                        bg_color: tuple[int, int, int, int],
-                        text_color: tuple[int, int, int, int] = WHITE):
+                        color: tuple[int, int, int, int] = WHITE):
     """Citation entre chevrons français, centrée horizontalement et verticalement, répartie
-    sur plusieurs lignes si nécessaire, sur un pavé plein `bg_color` — même traitement que
-    le pavé événement (mode --duo, photo "citation")."""
+    sur plusieurs lignes si nécessaire — même style manuscrit que la signature (mode adaptatif,
+    rôle -citation) : police cursive, pas de bloc/voile derrière, juste une ombre portée légère
+    pour la lisibilité."""
     w, h = img.size
     base = min(w, h)
-    text = f"« {citation} »"
+    text = f"\u00ab {citation} \u00bb"
     max_width = w * 0.8
     max_height = h * 0.5
     start_size = max(24, int(base * 0.055))
@@ -453,24 +437,14 @@ def draw_citation_zone(img: Image.Image, draw: ImageDraw.ImageDraw, citation: st
     line_gap = int(font.size * 0.25)
     total_h = len(lines) * line_h + (len(lines) - 1) * line_gap
 
-    content_w = 0.0
-    for line in lines:
-        bbox = font.getbbox(line)
-        content_w = max(content_w, bbox[2] - bbox[0])
-
-    pad_x = int(base * 0.05)
-    pad_y = int(base * 0.035)
-    y0 = (h - total_h) / 2
-    box = ((w - content_w) / 2 - pad_x, y0 - pad_y,
-           (w + content_w) / 2 + pad_x, y0 + total_h + pad_y)
-    draw.rounded_rectangle(box, radius=int(base * 0.015), fill=bg_color)
-
-    y = y0
+    shadow = max(1, int(base * 0.003))
+    y = (h - total_h) / 2
     for line in lines:
         bbox = font.getbbox(line)
         line_w = bbox[2] - bbox[0]
         x = (w - line_w) / 2
-        draw.text((x, y), line, font=font, fill=text_color)
+        draw.text((x + shadow, y + shadow), line, font=font, fill=(0, 0, 0, 140))
+        draw.text((x, y), line, font=font, fill=color)
         y += line_h + line_gap
 
 
@@ -631,6 +605,7 @@ def parse_stat(raw: str) -> tuple[str, str, str]:
 
 IMG_EXTS = {".jpg", ".jpeg", ".png"}
 NO_DATE_KEY = "sans-date"
+OUTPUT_SUFFIXES = ("-gauche", "-droite")  # suffixes exclusifs des sorties mode single, jamais des sources brutes
 
 
 def collect_photos(in_dir: Path) -> list[Path]:
@@ -678,6 +653,41 @@ def _save_image(img: Image.Image, out_path: Path, photo: Path):
         os.utime(out_path, (ts, ts))
 
 
+def draw_signature_zone(img: Image.Image, draw: ImageDraw.ImageDraw, text: str,
+                         color: tuple[int, int, int, int] = WHITE):
+    """Signature discrète en bas à droite — seul marquage des photos non surchargées (mode
+    adaptatif, aucun suffixe reconnu). Pas de bloc/voile derrière le texte (contrairement aux
+    autres zones) : rendu en police cursive (Snell Roundhand) façon signature manuscrite, avec
+    une simple ombre portée pour rester lisible sans assombrir la photo."""
+    w, h = img.size
+    base = min(w, h)
+    margin_x = int(base * 0.045)
+    margin_bottom = int(h * 0.045)
+
+    size = max(24, int(base * 0.05))
+    font = fit_font(FONT_SIGNATURE_PATH, text, int(w * 0.6), size, index=FONT_SIGNATURE_INDEX)
+    bbox = font.getbbox(text)
+    text_w = bbox[2] - bbox[0]
+    text_h = bbox[3] - bbox[1]
+
+    x = w - margin_x - text_w
+    y = h - margin_bottom - text_h
+    shadow = max(1, int(base * 0.003))
+    draw.text((x + shadow, y + shadow), text, font=font, fill=(0, 0, 0, 140))
+    draw.text((x, y), text, font=font, fill=color)
+
+
+def render_signature(photo: Path, out_path: Path, signature: str, accent: tuple[int, int, int, int]):
+    """Rôle par défaut en mode adaptatif pour une photo sans suffixe reconnu : aucun habillage
+    informatif (pas de titre/événement/stats/tracé/vignette) — juste la signature du compte en
+    bas à droite, pour les photos brutes de carrousel qu'on ne veut pas surcharger."""
+    signature = sanitize_text(signature, FONT_SIGNATURE_PATH)
+    img = _prepare_image(photo)
+    draw = ImageDraw.Draw(img)
+    draw_signature_zone(img, draw, signature, color=accent)
+    _save_image(img, out_path, photo)
+
+
 def render_one(photo: Path, out_path: Path, event_name: str, titre: str, date_heure: str, lieu: str,
                stats: list[tuple[str, str, str]], accent: tuple[int, int, int, int], position: str,
                track: list[list[tuple[float, float]]] | None = None):
@@ -705,15 +715,37 @@ def render_one(photo: Path, out_path: Path, event_name: str, titre: str, date_he
     _save_image(img, out_path, photo)
 
 
-def render_scene(photo: Path, out_path: Path, event_name: str, date_heure: str, lieu: str,
-                  accent: tuple[int, int, int, int], track: list[list[tuple[float, float]]] | None = None,
-                  position: str = "droite"):
-    """Mode --duo, 1ʳᵉ photo : nom d'événement, date, lieu et tracé GPS — sans titre ni stats.
-    Pas de bloc stats sur cette photo (il est sur la photo "stats") : `position` ne fait que
-    choisir le coin bas du tracé (bas gauche par défaut), sans contrainte d'opposition."""
-    event_name = sanitize_text(event_name, FONT_BOLD)
-    lieu = sanitize_text(lieu, FONT_REGULAR)
-    date_heure = sanitize_text(date_heure, FONT_REGULAR)
+def render_scene(photo: Path, out_path: Path, event_name: str, titre: str, date_heure: str, lieu: str,
+                  stats: list[tuple[str, str, str]], accent: tuple[int, int, int, int],
+                  track: list[list[tuple[float, float]]] | None = None, position: str = "droite"):
+    """Rôle -scene (mode adaptatif) : identité complète du post sur une seule photo — nom
+    d'événement, titre, date, lieu, statistiques et tracé GPS. Seul rôle indispensable : son
+    absence pour une date/un post est signalée. Même contenu que le mode single (`render_one`)
+    mais une seule image en sortie (pas de variante gauche/droite), pour une photo déjà cadrée
+    par Denis. `position` choisit le côté du bloc stats (bas droite par défaut) ; le tracé va
+    systématiquement au coin bas opposé."""
+    render_one(photo, out_path, event_name, titre, date_heure, lieu, stats, accent, position, track=track)
+
+
+def render_titre(photo: Path, out_path: Path, titre: str, accent: tuple[int, int, int, int]):
+    """Rôle -titre (mode adaptatif) : titre seul — sans nom d'événement, lieu, stats ni tracé."""
+    titre = sanitize_text(titre, FONT_BOLD)
+
+    img = _prepare_image(photo)
+    img = add_vertical_vignette(img, top_h_frac=0.22, bottom_h_frac=0.32)
+
+    draw = ImageDraw.Draw(img)
+    draw_title_only_zone(img, draw, titre, color=accent)
+
+    _save_image(img, out_path, photo)
+
+
+def render_stat(photo: Path, out_path: Path, stats: list[tuple[str, str, str]],
+                 accent: tuple[int, int, int, int], track: list[list[tuple[float, float]]] | None = None,
+                 position: str = "gauche"):
+    """Rôle -stat (mode adaptatif) : statistiques et tracé GPS — sans titre ni nom d'événement."""
+    stats = [(sanitize_text(l, FONT_REGULAR), sanitize_text(v, FONT_BOLD), sanitize_text(u, FONT_BOLD))
+             for l, v, u in stats]
 
     img = _prepare_image(photo)
     img = add_vertical_vignette(img, top_h_frac=0.22, bottom_h_frac=0.32)
@@ -722,25 +754,6 @@ def render_scene(photo: Path, out_path: Path, event_name: str, date_heure: str, 
         draw_gps_track_zone(img, track, color=accent, position=position)
 
     draw = ImageDraw.Draw(img)
-    draw_meta_zone(img, draw, date_heure, lieu, color=accent)
-    draw_logo_zone(img, event_name, box_color=accent)
-
-    _save_image(img, out_path, photo)
-
-
-def render_stats(photo: Path, out_path: Path, titre: str, stats: list[tuple[str, str, str]],
-                  accent: tuple[int, int, int, int], position: str):
-    """Mode --duo, 2ᵉ photo : titre et statistiques — sans nom d'événement, date, lieu ni tracé."""
-    titre = sanitize_text(titre, FONT_BOLD)
-    stats = [(sanitize_text(l, FONT_REGULAR), sanitize_text(v, FONT_BOLD), sanitize_text(u, FONT_BOLD))
-             for l, v, u in stats]
-
-    img = _prepare_image(photo)
-    img = add_vertical_vignette(img, top_h_frac=0.22, bottom_h_frac=0.32)
-
-    draw = ImageDraw.Draw(img)
-    draw_title_only_zone(img, draw, titre, color=accent)
-
     if stats:
         draw_stats_zone(img, draw, stats, color=accent, position=position)
 
@@ -748,39 +761,104 @@ def render_stats(photo: Path, out_path: Path, titre: str, stats: list[tuple[str,
 
 
 def render_citation(photo: Path, out_path: Path, citation: str, accent: tuple[int, int, int, int],
-                     voile: bool = False):
-    """Mode --duo, photo optionnelle "citation" : citation entre chevrons, centrée, répartie
-    sur plusieurs lignes si nécessaire, sur un pavé plein de la couleur d'accent (même
-    traitement que le pavé événement), texte blanc. `voile` (option par date, clé
-    'citation_voile' du manifest) applique un voile blanc à 50% sur toute la photo avant le
-    pavé — utile si une photo trop chargée/claire nuit au contraste, mais plus nécessaire à
-    la lisibilité du texte lui-même (le pavé plein s'en charge)."""
-    citation = sanitize_text(citation, FONT_BOLD)
-
+                     voile: bool = False, signature: str | None = None):
+    """Rôle -citation (mode adaptatif, optionnel) : citation entre chevrons, centrée, répartie
+    sur plusieurs lignes si nécessaire — même style manuscrit que la signature (police cursive,
+    pas de bloc/voile derrière le texte). `voile` (option par date, clé 'citation_voile' du
+    manifest) applique un voile blanc à 50% sur toute la photo — utile si une photo trop
+    chargée/claire nuit au contraste, plus nécessaire qu'avant vu l'absence de pavé plein
+    derrière le texte. `signature` (optionnel, même source que --signature/clé manifest) ajoute
+    en plus la signature du compte en bas à droite, comme sur les photos non surchargées."""
+    citation = sanitize_text(citation, FONT_SIGNATURE_PATH)
     img = _prepare_image(photo)
     if voile:
         img = apply_scrim_overlay(img, alpha=127, rgb=(255, 255, 255))
 
     draw = ImageDraw.Draw(img)
-    draw_citation_zone(img, draw, citation, bg_color=accent, text_color=WHITE)
+    draw_citation_zone(img, draw, citation, color=accent)
+    if signature:
+        signature = sanitize_text(signature, FONT_SIGNATURE_PATH)
+        draw_signature_zone(img, draw, signature, color=accent)
 
     _save_image(img, out_path, photo)
 
 
+PHOTO_ROLES = ("scene", "titre", "stat", "citation")
+
+
 def photo_role(photo: Path) -> str | None:
-    """Rôle d'une photo en mode --duo, d'après son nom de fichier : suffixe '-scene'
-    (événement/date/lieu/tracé), '-stats' (titre/stats) ou '-citation' (citation seule,
-    optionnelle). None si aucun de ces suffixes n'est présent — la date reste extraite
-    normalement par `photo_date` (regex ancrée en début de nom, insensible au suffixe de
-    rôle)."""
+    """Rôle d'une photo en mode adaptatif, d'après son nom de fichier : suffixe '-scene'
+    (identité complète du post : événement/titre/date/lieu/stats/tracé, seul rôle indispensable),
+    '-titre' (titre seul), '-stat' (stats + tracé, sans événement/date/lieu) ou '-citation'
+    (citation seule) — tous optionnels
+    sauf -scene. None si aucun de ces suffixes n'est présent : la photo n'est alors pas surchargée (cf.
+    render_adaptive — signature seule, ou rien si aucune signature fournie). La date reste
+    extraite normalement par `photo_date` (regex ancrée en début de nom, insensible au
+    suffixe de rôle)."""
     stem = photo.stem
-    if stem.endswith("-scene"):
-        return "scene"
-    if stem.endswith("-stats"):
-        return "stats"
-    if stem.endswith("-citation"):
-        return "citation"
+    for role in PHOTO_ROLES:
+        if stem.endswith(f"-{role}"):
+            return role
     return None
+
+
+def render_adaptive(photos: list[Path], out_dir: Path, event_name: str, titre: str, lieu: str,
+                     stats: list[tuple[str, str, str]], date_heure: str,
+                     accent: tuple[int, int, int, int], track: list[list[tuple[float, float]]] | None,
+                     citation: str | None, citation_voile: bool, key: str, signature: str | None = None):
+    """Mode adaptatif : chaque photo suffixée (-scene/-titre/-stat/-citation) reçoit le rendu
+    correspondant à son seul rôle (une image en sortie, même nom que l'entrée). -scene est le
+    seul rôle indispensable : son absence est signalée sans bloquer le reste. Toute photo sans
+    suffixe reconnu n'est PAS surchargée (pas de titre/événement/stats/tracé) — elle reçoit
+    uniquement la signature `signature` en bas à droite si fournie (sinon laissée telle quelle,
+    intacte : ce sont typiquement des photos brutes de carrousel, volontairement non brandées)."""
+    suffixed: dict[str, Path] = {}
+    unsuffixed: list[Path] = []
+    for p in photos:
+        role = photo_role(p)
+        if role:
+            suffixed[role] = p
+        else:
+            unsuffixed.append(p)
+
+    if suffixed and "scene" not in suffixed:
+        print(f"⚠ Aucune photo -scene pour {key} — événement/titre/date/lieu/stats absents du rendu",
+              file=sys.stderr)
+
+    if "scene" in suffixed:
+        p = suffixed["scene"]
+        out_path = out_dir / f"{p.stem}.jpg"
+        render_scene(p, out_path, event_name, titre, date_heure, lieu, stats, accent, track=track)
+        print(f"✓ Image : {out_path}")
+
+    if "titre" in suffixed:
+        p = suffixed["titre"]
+        out_path = out_dir / f"{p.stem}.jpg"
+        render_titre(p, out_path, titre, accent)
+        print(f"✓ Image : {out_path}")
+
+    if "stat" in suffixed:
+        p = suffixed["stat"]
+        out_path = out_dir / f"{p.stem}.jpg"
+        render_stat(p, out_path, stats, accent, track=track)
+        print(f"✓ Image : {out_path}")
+
+    if "citation" in suffixed:
+        p = suffixed["citation"]
+        if not citation:
+            print(f"✗ Photo citation trouvée pour {key} mais aucun champ 'citation' "
+                  f"dans le manifest", file=sys.stderr)
+            sys.exit(1)
+        out_path = out_dir / f"{p.stem}.jpg"
+        render_citation(p, out_path, citation, accent, voile=citation_voile, signature=signature)
+        print(f"✓ Image : {out_path}")
+
+    for photo in unsuffixed:
+        if not signature:
+            continue
+        out_path = out_dir / f"{photo.stem}.jpg"
+        render_signature(photo, out_path, signature, accent)
+        print(f"✓ Image : {out_path}")
 
 
 def main():
@@ -817,6 +895,14 @@ def main():
                               "sur la photo. Répétable si plusieurs activités distinctes (segments "
                               "dessinés séparément, à échelle commune). En mode --manifest, indiquer "
                               "plutôt une clé 'gpx' par date (chaîne ou liste de chaînes).")
+    parser.add_argument("--signature", default=None,
+                         help="Mode --manifest/--serie uniquement. Texte (ex. 'Trek My Mind') à apposer "
+                              "en bas à droite des photos SANS suffixe reconnu (-scene/-titre/-stat/"
+                              "-citation) — aucun autre habillage sur ces photos (pas de titre/événement/"
+                              "stats/tracé, pas de vignette), pour les photos brutes de carrousel qu'on "
+                              "ne veut pas surcharger. Omis ou vide : ces photos restent intactes, non "
+                              "traitées. Mêmes règles de priorité que --event-name (clé 'signature' du "
+                              "manifest si non fourni ici).")
     parser.add_argument("--manifest", type=Path, default=None,
                          help="JSON {event_name, couleur, dates: {date_iso: {titre, lieu, stat, gpx}}} — un "
                               "habillage par date de prise de vue plutôt qu'un habillage uniforme. Prioritaire "
@@ -833,15 +919,19 @@ def main():
     parser.add_argument("--gpx-dir", type=Path, default=None,
                          help="Dossier des fichiers .gpx à rapprocher des dates (mode --init-manifest). "
                               "Déduit de --dossier (<dossier>/gpx) si omis ; à défaut, --in-dir.")
-    parser.add_argument("--duo", action="store_true",
-                         help="Mode --manifest uniquement. Au lieu d'incruster titre+lieu+stats+tracé sur "
-                              "chaque photo (versions gauche/droite), attend au moins 2 photos déjà au "
-                              "ratio 4:5 par date, nommées '<...>-scene.jpg' et '<...>-stats.jpg' : la photo "
-                              "'scene' reçoit nom d'événement, date, lieu et tracé GPS ; la photo 'stats' "
-                              "reçoit titre et statistiques. Une 3ᵉ photo optionnelle '<...>-citation.jpg' "
-                              "reçoit un voile noir semi-transparent et la citation (clé 'citation' du "
-                              "manifest pour cette date) entre guillemets, centrée. Une seule image générée "
-                              "(pas de variante gauche/droite, les photos étant déjà cadrées par Denis).")
+    parser.add_argument("--serie", type=Path, default=None,
+                         help="Dossier série (nouvelle convention par post) : <série>/manifest.json global "
+                              "+ un sous-dossier par post <série>/<Jxx-titre>/photos/. Pour chaque post : "
+                              "toute photo pas encore sauvegardée est copiée dans photos/originaux/ (source "
+                              "pérenne, permet de retraiter), puis rendue en mode adaptatif directement dans "
+                              "photos/ (écrase la version précédente du même nom). Mode adaptatif : une photo "
+                              "'<...>-scene.jpg' reçoit l'identité complète (événement/titre/date/lieu/"
+                              "stats/tracé), '<...>-titre.jpg' le titre seul, '<...>-stat.jpg' les "
+                              "stats + tracé, '<...>-citation.jpg' la "
+                              "citation (clé 'citation' du manifest) — tous optionnels sauf -scene (absence "
+                              "signalée). Toute photo sans suffixe reconnu n'est pas surchargée — voir "
+                              "--signature. La date de chaque post est déduite de ses photos (EXIF ou nom "
+                              "de fichier) ; un post doit correspondre à une seule date du manifest.")
 
     args = parser.parse_args()
 
@@ -854,6 +944,82 @@ def main():
             args.out_dir = args.dossier / "out"
         if args.manifest is None:
             args.manifest = args.dossier / "manifest.json"
+
+    if args.serie:
+        manifest_path = args.manifest or (args.serie / "manifest.json")
+        if not manifest_path.exists():
+            print(f"✗ Manifest introuvable : {manifest_path}", file=sys.stderr)
+            sys.exit(1)
+        content = json.loads(manifest_path.read_text())
+        event_name = args.event_name or content.get("event_name") or "GARMIN"
+        couleur = args.couleur or content.get("couleur")
+        accent = parse_color(couleur) if couleur else WHITE
+        signature = args.signature or content.get("signature")
+        dates_map = content.get("dates", {})
+
+        post_dirs = sorted(d for d in args.serie.iterdir() if d.is_dir() and (d / "photos").is_dir())
+        if not post_dirs:
+            print(f"✗ Aucun sous-dossier <post>/photos/ trouvé dans {args.serie}", file=sys.stderr)
+            sys.exit(1)
+
+        for post_dir in post_dirs:
+            photos_dir = post_dir / "photos"
+            originaux_dir = photos_dir / "originaux"
+            originaux_dir.mkdir(parents=True, exist_ok=True)
+
+            for f in sorted(photos_dir.iterdir()):
+                if f.is_file() and f.suffix.lower() in IMG_EXTS and not f.stem.endswith(OUTPUT_SUFFIXES):
+                    backup = originaux_dir / f.name
+                    if not backup.exists():
+                        shutil.copy2(f, backup)
+                        print(f"  ↳ sauvegarde : {backup}")
+
+            sources = collect_photos(originaux_dir)
+            if not sources:
+                print(f"⚠ Aucune photo dans {originaux_dir} — post ignoré", file=sys.stderr)
+                continue
+
+            groups = group_by_date(sources)
+            if len(groups) > 1:
+                print(f"✗ {post_dir.name} : plusieurs dates détectées parmi les photos "
+                      f"({', '.join(sorted(groups))}) — un post doit correspondre à une seule date",
+                      file=sys.stderr)
+                sys.exit(1)
+            key = next(iter(groups))
+
+            if key not in dates_map:
+                print(f"✗ {post_dir.name} : date {key} absente du manifest {manifest_path}", file=sys.stderr)
+                sys.exit(1)
+            entry = dates_map[key]
+            if not entry.get("titre") or not entry.get("lieu"):
+                print(f"✗ {post_dir.name} : manifest incomplet (titre/lieu manquant) pour {key}",
+                      file=sys.stderr)
+                sys.exit(1)
+
+            titre = entry["titre"]
+            lieu = entry["lieu"]
+            stats = [parse_stat(s) for s in entry.get("stat", [])]
+            date_heure = format_date_fr(date.fromisoformat(key)) if key != NO_DATE_KEY else ""
+
+            track = None
+            gpx_raw = entry.get("gpx")
+            if gpx_raw:
+                gpx_list = [gpx_raw] if isinstance(gpx_raw, str) else gpx_raw
+                track = []
+                for raw in gpx_list:
+                    gpx_path = Path(raw)
+                    if not gpx_path.is_absolute():
+                        gpx_path = manifest_path.parent / gpx_path
+                    if not gpx_path.exists():
+                        print(f"✗ GPX introuvable pour {key} : {gpx_path}", file=sys.stderr)
+                        sys.exit(1)
+                    track.append(load_gpx_track(gpx_path))
+
+            print(f"— {post_dir.name} ({key}) —")
+            render_adaptive(sources, photos_dir, event_name, titre, lieu, stats, date_heure, accent,
+                             track, entry.get("citation"), bool(entry.get("citation_voile", False)), key,
+                             signature=signature)
+        return
 
     if args.in_dir is None:
         print("✗ --in-dir ou --dossier requis", file=sys.stderr)
@@ -940,6 +1106,7 @@ def main():
         event_name = args.event_name or content.get("event_name") or "GARMIN"
         couleur = args.couleur or content.get("couleur")
         accent = parse_color(couleur) if couleur else WHITE
+        signature = args.signature or content.get("signature")
         dates_map = content.get("dates", {})
 
         groups = group_by_date(photos)
@@ -974,45 +1141,9 @@ def main():
                         sys.exit(1)
                     track.append(load_gpx_track(gpx_path))
 
-            if args.duo:
-                roles: dict[str, Path] = {}
-                unrecognized = []
-                for p in groups[key]:
-                    r = photo_role(p)
-                    if r is None:
-                        unrecognized.append(p)
-                    else:
-                        roles[r] = p
-                if unrecognized or "scene" not in roles or "stats" not in roles:
-                    noms = ", ".join(p.name for p in groups[key])
-                    print(f"✗ Mode --duo : {key} doit avoir au moins 2 photos nommées "
-                          f"'*-scene.jpg' et '*-stats.jpg' (une '*-citation.jpg' optionnelle "
-                          f"est aussi acceptée) — trouvé : {noms}", file=sys.stderr)
-                    sys.exit(1)
-                out_scene = args.out_dir / f"{roles['scene'].stem}.jpg"
-                render_scene(roles["scene"], out_scene, event_name, date_heure, lieu, accent, track=track)
-                print(f"✓ Image : {out_scene}")
-                out_stats = args.out_dir / f"{roles['stats'].stem}.jpg"
-                render_stats(roles["stats"], out_stats, titre, stats, accent, position="gauche")
-                print(f"✓ Image : {out_stats}")
-                if "citation" in roles:
-                    citation = entry.get("citation")
-                    if not citation:
-                        print(f"✗ Photo citation trouvée pour {key} mais aucun champ 'citation' "
-                              f"dans le manifest", file=sys.stderr)
-                        sys.exit(1)
-                    out_citation = args.out_dir / f"{roles['citation'].stem}.jpg"
-                    render_citation(roles["citation"], out_citation, citation, accent,
-                                     voile=bool(entry.get("citation_voile", False)))
-                    print(f"✓ Image : {out_citation}")
-                continue
-
-            for photo in groups[key]:
-                for position in ("gauche", "droite"):
-                    out_path = args.out_dir / f"{photo.stem}-{position}.jpg"
-                    render_one(photo, out_path, event_name, titre, date_heure, lieu,
-                               stats, accent, position, track=track)
-                    print(f"✓ Image : {out_path}")
+            render_adaptive(groups[key], args.out_dir, event_name, titre, lieu, stats, date_heure, accent,
+                             track, entry.get("citation"), bool(entry.get("citation_voile", False)), key,
+                             signature=signature)
         return
 
     if not args.titre or not args.lieu:
